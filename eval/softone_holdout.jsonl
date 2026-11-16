@@ -1,0 +1,12 @@
+{"id": "hp01", "question": "How many document lines are there in total?", "sql": "SELECT COUNT(*) FROM MTRLINES"}
+{"id": "hp02", "question": "What is the total net amount of all documents?", "sql": "SELECT ROUND(SUM(NETAMNT), 2) FROM FINDOC"}
+{"id": "hp03", "question": "What is the total quantity recorded on document lines?", "sql": "SELECT ROUND(SUM(QTY1), 2) FROM MTRLINES"}
+{"id": "hp04", "question": "How many different branches appear in the document table?", "sql": "SELECT COUNT(DISTINCT BRANCH) FROM FINDOC"}
+{"id": "hp05", "question": "Show the number of documents for each year.", "sql": "SELECT SUBSTR(TRNDATE, 1, 4) AS doc_year, COUNT(*) AS document_count FROM FINDOC GROUP BY SUBSTR(TRNDATE, 1, 4)"}
+{"id": "hp06", "question": "Πόσα παραστατικά υπάρχουν συνολικά;", "sql": "SELECT COUNT(*) FROM FINDOC"}
+{"id": "hc01", "question": "How many customers are there?", "sql": "SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 13"}
+{"id": "hc02", "question": "Πόσοι προμηθευτές υπάρχουν;", "sql": "SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 12"}
+{"id": "hc03", "question": "How many purchase documents are there?", "sql": "SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1253"}
+{"id": "hc04", "question": "How many sales documents have not been cancelled?", "sql": "SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1351 AND ISCANCEL = 0"}
+{"id": "hc05", "question": "Ποιο είναι το συνολικό ποσό των πληρωμών σε προμηθευτές;", "sql": "SELECT ROUND(SUM(SUMAMNT), 2) FROM FINDOC WHERE SOSOURCE = 1281"}
+{"id": "hc06", "question": "How many service items are there?", "sql": "SELECT COUNT(*) FROM MTRL WHERE SODTYPE = 52"}

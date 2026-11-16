@@ -96,6 +96,13 @@ case "$CMD" in
     PYTHONPATH=. uv run --with pytest --with numpy pytest -q
     ;;
 
+  real-eval)
+    ensure_certs
+    docker compose down -v >/dev/null 2>&1 || true
+    FEDRAG_EMBEDDER=ollama docker compose up -d --build
+    $PY scripts/run_real_eval.py
+    ;;
+
   all)
     $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer
     docker compose down -v >/dev/null 2>&1 || true

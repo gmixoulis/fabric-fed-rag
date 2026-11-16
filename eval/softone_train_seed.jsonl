@@ -1,0 +1,16 @@
+{"question":"How many different companies appear in the trader table?","sql":"SELECT COUNT(DISTINCT COMPANY) FROM TRDR"}
+{"question":"How many different companies have item records?","sql":"SELECT COUNT(DISTINCT COMPANY) FROM MTRL"}
+{"question":"How many different companies have documents?","sql":"SELECT COUNT(DISTINCT COMPANY) FROM FINDOC"}
+{"question":"What is the earliest document date?","sql":"SELECT MIN(TRNDATE) FROM FINDOC"}
+{"question":"What is the latest document date?","sql":"SELECT MAX(TRNDATE) FROM FINDOC"}
+{"question":"How many documents are dated in 2023?","sql":"SELECT COUNT(*) FROM FINDOC WHERE TRNDATE >= '2023-01-01' AND TRNDATE < '2024-01-01'"}
+{"question":"How many documents are dated in 2025?","sql":"SELECT COUNT(*) FROM FINDOC WHERE TRNDATE >= '2025-01-01' AND TRNDATE < '2026-01-01'"}
+{"question":"Show document counts for each company.","sql":"SELECT COMPANY, COUNT(*) AS document_count FROM FINDOC GROUP BY COMPANY"}
+{"question":"Show item counts for each company.","sql":"SELECT COMPANY, COUNT(*) AS item_count FROM MTRL GROUP BY COMPANY"}
+{"question":"Show trader counts for each company.","sql":"SELECT COMPANY, COUNT(*) AS trader_count FROM TRDR GROUP BY COMPANY"}
+{"question":"List the latest 5 documents and their dates.","sql":"SELECT COMPANY, FINDOC, TRNDATE FROM FINDOC ORDER BY TRNDATE DESC, COMPANY, FINDOC LIMIT 5"}
+{"question":"Show the count of document lines for each company.","sql":"SELECT COMPANY, COUNT(*) AS line_count FROM MTRLINES GROUP BY COMPANY"}
+{"question":"What were our sales last year?","sql":"CANNOT_ANSWER"}
+{"question":"How many suppliers are active?","sql":"CANNOT_ANSWER"}
+{"question":"Which customers spent the most?","sql":"CANNOT_ANSWER"}
+{"question":"How many cancelled sales documents are there?","sql":"CANNOT_ANSWER"}
