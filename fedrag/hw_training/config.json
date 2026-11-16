@@ -1,0 +1,21 @@
+{
+  "base_pc": "~/.local/share/softone-chat/qwen35-4b-bnb",
+  "base_mac": "~/opt/fedtrain/models/qwen35-4b",
+  "rounds": 3,
+  "local_steps": 8,
+  "lr": 0.0001,
+  "lora": {
+    "r": 4,
+    "alpha": 8,
+    "dropout": 0.05,
+    "target_modules": ["q_proj", "v_proj"]
+  },
+  "max_length": 2048,
+  "seed": 42,
+  "grad_accumulation": 4,
+  "shard_weights": [0.5, 0.5],
+  "mps_memory_fraction": 0.75,
+  "mps_dtype": "bfloat16",
+  "mac_rss_limit_gb": 13,
+  "round_timeout_s": 3600
+}
