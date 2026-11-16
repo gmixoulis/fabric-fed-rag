@@ -1,0 +1,52 @@
+services:
+  node1-maestro:
+    build: .
+    container_name: node1-maestro
+    hostname: node1-maestro
+    environment:
+      - NODE_ID=node1-maestro
+      - SHARD_ID=shard-1
+      - RAFT_ROLE=leader
+      - LEADER_URL=https://node1-maestro:7050
+      - RAFT_PEERS=https://node2-peer:7050
+      - PEER_RAG_URL=https://node2-peer:8443
+      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
+      - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
+    volumes:
+      - ./certs:/certs:ro
+      - node1-data:/data
+    ports:
+      - "127.0.0.1:17050:7050"
+      - "127.0.0.1:18443:8443"
+    networks:
+      - fabric-mtls-net
+
+  node2-peer:
+    build: .
+    container_name: node2-peer
+    hostname: node2-peer
+    environment:
+      - NODE_ID=node2-peer
+      - SHARD_ID=shard-2
+      - RAFT_ROLE=follower
+      - LEADER_URL=https://node1-maestro:7050
+      - RAFT_PEERS=
+      - PEER_RAG_URL=https://node1-maestro:8443
+      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
+      - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
+    volumes:
+      - ./certs:/certs:ro
+      - node2-data:/data
+    ports:
+      - "127.0.0.1:27050:7050"
+      - "127.0.0.1:28443:8443"
+    networks:
+      - fabric-mtls-net
+
+volumes:
+  node1-data:
+  node2-data:
+
+networks:
+  fabric-mtls-net:
+    driver: bridge

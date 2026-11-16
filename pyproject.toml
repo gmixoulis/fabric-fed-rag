@@ -1,0 +1,25 @@
+[project]
+name = "fabric-fed-rag"
+version = "0.1.0"
+description = "Decentralized 50/50 Sharded RAG & Federated LoRA Training over Go Raft + mTLS"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 125
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
