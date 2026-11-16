@@ -9,6 +9,12 @@ from fedrag.certgen import generate_swarm_key
 from fedrag.embed import HashEmbedder
 from fedrag.fedavg import adapter_sha256, average_adapters, load_adapter_npz
 from fedrag.ipfs_client import LocalCIDStore, compute_cidv1_raw
+from fedrag.pdf_embedder import (
+    PDFEmbedder,
+    build_full_pdf_with_metadata,
+    build_metadata_stub_pdf,
+    extract_and_validate_pdf,
+)
 from fedrag.raft_ledger import LedgerState
 from fedrag.shard_store import ShardedRAGStore
 from fedrag.trainer import train_local_lora_round
@@ -151,3 +157,41 @@ def test_ipfs_cidv1_and_private_swarm_key(tmp_path):
     assert lines[0] == "/key/swarm/psk/1.0.0/"
     assert lines[1] == "/base16/"
     assert len(lines[2]) == 64
+
+
+def test_pdf_embedder_and_metadata_stub_pdf(tmp_path):
+    chunks = [
+        "Customers are traders with TRDR.SODTYPE 13.",
+        "Suppliers are traders with TRDR.SODTYPE 12.",
+    ]
+    pdf_bytes, meta = build_full_pdf_with_metadata(
+        doc_id="doc-pdf-1",
+        title="SoftOne Trader Codes",
+        shard_owner="node1-maestro",
+        metadata_holder="node2-peer",
+        chunks=chunks,
+        page_count=2,
+    )
+
+    pdf_embedder = PDFEmbedder(HashEmbedder())
+    artifact = pdf_embedder.embed_pdf_bytes(pdf_bytes, expected_pdf_sha256=meta["pdf_sha256"])
+    assert artifact.internal_hash_verified is True
+    assert artifact.chunks == chunks
+    assert artifact.content_sha256 == meta["content_sha256"]
+    assert artifact.chunks_sha256 == meta["chunks_sha256"]
+    assert artifact.vectors.shape[0] == 2
+
+    # Build the metadata-only stub PDF for the other 50% peer node and validate its hash
+    stub_bytes, stub_meta = build_metadata_stub_pdf(meta)
+    parsed_stub = extract_and_validate_pdf(
+        stub_bytes, expected_pdf_sha256=stub_meta["stub_pdf_sha256"]
+    )
+    assert parsed_stub["is_metadata_only"] is True
+    assert parsed_stub["pdf_sha256"] == meta["pdf_sha256"]
+    assert parsed_stub["content_sha256"] == meta["content_sha256"]
+    assert parsed_stub["chunks_sha256"] == meta["chunks_sha256"]
+
+    # Tampering with a chunk inside the PDF binary must fail internal metadata hash validation
+    tampered_bytes = pdf_bytes.replace(b"SODTYPE 13", b"SODTYPE 99")
+    with pytest.raises(ValueError, match="content_sha256 mismatch"):
+        extract_and_validate_pdf(tampered_bytes)

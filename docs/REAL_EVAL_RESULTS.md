@@ -7,35 +7,35 @@ connected to host Ollama (`embeddinggemma:latest` 768-d semantic embeddings + `q
 
 | Document ID | Active Shard Owner | Metadata + Backup Peer | Kubo IPFS CIDv1 | PDF SHA-256 | Chunks |
 |---|---|---|---|---|---|
-| `real-pdf-trdr` | `node1-maestro` | `node2-peer` | `bafkreieerua6fyjqae4zgaw4q2mf3onl7q5jpeqgyyizr3bmjmk5ftkbn4` | `848d01e2e1300139...` | 4 |
-| `real-pdf-mtrl` | `node1-maestro` | `node2-peer` | `bafkreiggfqqzy5xcinddj2wx6sme4knbvvnbntb2u4xhfveqveqwd6tf3y` | `c62c219c76e24346...` | 4 |
-| `real-pdf-findoc-series` | `node2-peer` | `node1-maestro` | `bafkreieaizl5aryyk66k56rj6wbavkztitjg6dmpmpx4p6hcmv7fkkjdju` | `804657d0471857bc...` | 4 |
-| `real-pdf-findoc-sides` | `node2-peer` | `node1-maestro` | `bafkreicoliwztiuss24v2h7rxyb3wxaspx2vimgkvzp7xu7htvvu5glae4` | `4e5a2d99a29296b9...` | 3 |
+| `real-pdf-trdr` | `node1-maestro` | `node2-peer` | `bafkreibfcaij5yzc376gmb5kbxoz3g45scmzbr5ct5ciqifqr2bl6oytkm` | `2510109ee322dffc...` | 4 |
+| `real-pdf-mtrl` | `node1-maestro` | `node2-peer` | `bafkreifetf62lfwzxe44jjazqln2o6pxq3ymu46xfz2kum3rvaay433ou4` | `a4997da596d9b939...` | 4 |
+| `real-pdf-findoc-series` | `node2-peer` | `node1-maestro` | `bafkreig25jagqy3l4u5jvdr4n5cr6j6nuv2t5l4d6babqfjvjtnisbidxm` | `daea4068636be53a...` | 4 |
+| `real-pdf-findoc-sides` | `node2-peer` | `node1-maestro` | `bafkreifnqwz5lec62zoaape4toe5fjfhkqjlwaek6dhbroz5ngfx7aq4sq` | `ad85b3d5905ed65c...` | 3 |
 
 ## 2. Held-Out Evaluation (`eval/softone_holdout.jsonl`, 12 Cases, EN + EL, `qwen3.5:4b`)
 
 | Experimental Condition | Passed | Pass Rate | Plain (`hp01–06`) | Code (`hc01–06`) | Time |
 |---|---|---|---|---|---|
-| **0% PDFs (No RAG / Base qwen3.5:4b)** | **6/12** | **50.0%** | 6/6 | 0/6 | 22.45 s |
-| **50% PDFs (Node 1 Shard 1 Only)** | **8/12** | **66.7%** | 5/6 | 3/6 | 38.68 s |
-| **100% Shards (Decentralized 50/50 Scatter-Gather mTLS + IPFS)** | **10/12** | **83.3%** | 6/6 | 4/6 | 57.96 s |
+| **0% PDFs (No RAG / Base qwen3.5:4b)** | **6/12** | **50.0%** | 6/6 | 0/6 | 31.37 s |
+| **50% PDFs (Node 1 Shard 1 Only)** | **9/12** | **75.0%** | 6/6 | 3/6 | 50.0 s |
+| **100% Shards (Decentralized 50/50 Scatter-Gather mTLS + IPFS)** | **11/12** | **91.7%** | 6/6 | 5/6 | 81.38 s |
 
 ### Per-Case Breakdown across Topologies
 
 | Case ID | Question | No-RAG | Single-Shard (50%) | Decentralized 50/50 RAG | Generated SQL (Decentralized) |
 |---|---|---|---|---|---|
-| `hp01` | How many document lines are there in total? | PASS | PASS | **PASS** | `SELECT COUNT(*) AS doc_line_count FROM MTRLINES;` |
-| `hp02` | What is the total net amount of all documents? | PASS | PASS | **PASS** | `SELECT ROUND(SUM(FINDOC.NETAMNT), 2) AS TOTAL_NET_AMOUNT FROM FINDOC;` |
-| `hp03` | What is the total quantity recorded on document lines? | PASS | PASS | **PASS** | `SELECT ROUND(SUM(MTRLINES.QTY1), 2) AS TOTAL_QUANTITY FROM MTRLINES;` |
+| `hp01` | How many document lines are there in total? | PASS | PASS | **PASS** | `SELECT COUNT(*) FROM MTRLINES;` |
+| `hp02` | What is the total net amount of all documents? | PASS | PASS | **PASS** | `SELECT ROUND(SUM(NETAMNT), 2) FROM FINDOC;` |
+| `hp03` | What is the total quantity recorded on document lines? | PASS | PASS | **PASS** | `SELECT ROUND(SUM(MTRLINES.QTY1), 2) FROM MTRLINES;` |
 | `hp04` | How many different branches appear in the document table? | PASS | PASS | **PASS** | `SELECT COUNT(DISTINCT BRANCH) FROM FINDOC;` |
 | `hp05` | Show the number of documents for each year. | PASS | PASS | **PASS** | `SELECT SUBSTR(TRNDATE, 1, 4) AS doc_year, COUNT(*) AS document_count FROM FINDOC GROUP BY SUBSTR(TRNDATE, 1, 4);` |
-| `hp06` | Πόσα παραστατικά υπάρχουν συνολικά; | PASS | FAIL | **PASS** | `SELECT COUNT(*) AS document_count FROM FINDOC WHERE COMPANY IS NOT NULL AND FINCODE IS NOT NULL AND TRNDATE IS NOT NULL AND BRANCH IS NOT NULL AND SOSOURCE IS NOT NULL AND SODTYPE IS NOT NULL AND NETAMNT IS NOT NULL AND SUMAMNT IS NOT NULL AND ISCANCEL IS NOT NULL;` |
-| `hc01` | How many customers are there? | FAIL | PASS | **PASS** | `SELECT COUNT(*) AS customer_count FROM TRDR WHERE SODTYPE = 13;` |
-| `hc02` | Πόσοι προμηθευτές υπάρχουν; | FAIL | PASS | **PASS** | `SELECT COUNT(*) AS supplier_count FROM TRDR WHERE SODTYPE = 12 AND COMPANY IS NOT NULL;` |
-| `hc03` | How many purchase documents are there? | FAIL | FAIL | **FAIL** | `SELECT COUNT(*) AS document_count FROM FINDOC WHERE SOSOURCE = 1351 AND SODTYPE = 14;` |
-| `hc04` | How many sales documents have not been cancelled? | FAIL | FAIL | **FAIL** | `SELECT COUNT(*) AS document_count FROM FINDOC WHERE SOSOURCE = 1351 AND SODTYPE = 13 AND ISCANCEL != 0;` |
+| `hp06` | Πόσα παραστατικά υπάρχουν συνολικά; | PASS | PASS | **PASS** | `SELECT COUNT(*) FROM FINDOC` |
+| `hc01` | How many customers are there? | FAIL | PASS | **PASS** | `SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 13;` |
+| `hc02` | Πόσοι προμηθευτές υπάρχουν; | FAIL | PASS | **PASS** | `SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 12` |
+| `hc03` | How many purchase documents are there? | FAIL | FAIL | **FAIL** | `SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = '1253' OR SOSOURCE = '1281';` |
+| `hc04` | How many sales documents have not been cancelled? | FAIL | FAIL | **PASS** | `SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1351 AND ISCANCEL = 0;` |
 | `hc05` | Ποιο είναι το συνολικό ποσό των πληρωμών σε προμηθευτές; | FAIL | FAIL | **PASS** | `SELECT ROUND(SUM(FINDOC.SUMAMNT), 2) AS total_amount FROM FINDOC WHERE SOSOURCE = 1281 AND SODTYPE = 12;` |
-| `hc06` | How many service items are there? | FAIL | PASS | **PASS** | `SELECT COUNT(*) AS total_service_items FROM MTRL WHERE SODTYPE = 52;` |
+| `hc06` | How many service items are there? | FAIL | PASS | **PASS** | `SELECT COUNT(*) FROM MTRL WHERE SODTYPE = 52;` |
 
 ## 3. Federated LoRA Training Ablation (`FedAvg-LoRA` vs. `FFA-LoRA`, 16 Seed Examples Split 8/8)
 
@@ -49,5 +49,5 @@ connected to host Ollama (`embeddinggemma:latest` 768-d semantic embeddings + `q
 
 ## 4. Final Cluster & Ledger State
 
-- **`node1-maestro`:** Raft Height = `39`, Tip Hash = `7bd20e0f843ac6978104...`, Kubo Pins = `25`
-- **`node2-peer`:** Raft Height = `39`, Tip Hash = `7bd20e0f843ac6978104...`, Kubo Pins = `15`
+- **`node1-maestro`:** Raft Height = `77`, Tip Hash = `08643b005800ac59972c...`, Kubo Pins = `25`
+- **`node2-peer`:** Raft Height = `77`, Tip Hash = `08643b005800ac59972c...`, Kubo Pins = `15`

@@ -1,0 +1,4 @@
+Experimental Condition,Passed Cases,Total Cases,Pass Rate (%),Plain SQL Passed (out of 6),Code-Guarded Passed (out of 6),Total Latency (s)
+0% PDFs (No RAG / Base qwen3.5:4b),6,12,50.0,6,0,31.37
+50% PDFs (Node 1 Shard 1 Only),9,12,75.0,6,3,50.0
+100% Shards (Decentralized 50/50 Scatter-Gather mTLS + IPFS),11,12,91.7,6,5,81.38

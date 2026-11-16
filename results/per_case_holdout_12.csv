@@ -1,0 +1,13 @@
+Case ID,Language,Kind,Question,Gold SQL,No-RAG Result,Single-Shard (50%) Result,Decentralized 50/50 RAG Result,Decentralized Generated SQL,Decentralized Latency (s)
+hp01,EN,Plain Schema,How many document lines are there in total?,SELECT COUNT(*) FROM MTRLINES,PASS,PASS,PASS,SELECT COUNT(*) FROM MTRLINES;,5.65
+hp02,EN,Plain Schema,What is the total net amount of all documents?,"SELECT ROUND(SUM(NETAMNT), 2) FROM FINDOC",PASS,PASS,PASS,"SELECT ROUND(SUM(NETAMNT), 2) FROM FINDOC;",5.98
+hp03,EN,Plain Schema,What is the total quantity recorded on document lines?,"SELECT ROUND(SUM(QTY1), 2) FROM MTRLINES",PASS,PASS,PASS,"SELECT ROUND(SUM(MTRLINES.QTY1), 2) FROM MTRLINES;",6.68
+hp04,EN,Plain Schema,How many different branches appear in the document table?,SELECT COUNT(DISTINCT BRANCH) FROM FINDOC,PASS,PASS,PASS,SELECT COUNT(DISTINCT BRANCH) FROM FINDOC;,6.01
+hp05,EN,Plain Schema,Show the number of documents for each year.,"SELECT SUBSTR(TRNDATE, 1, 4) AS doc_year, COUNT(*) AS document_count FROM FINDOC GROUP BY SUBSTR(TRNDATE, 1, 4)",PASS,PASS,PASS,"SELECT SUBSTR(TRNDATE, 1, 4) AS doc_year, COUNT(*) AS document_count FROM FINDOC GROUP BY SUBSTR(TRNDATE, 1, 4);",7.01
+hp06,EL,Plain Schema,Πόσα παραστατικά υπάρχουν συνολικά;,SELECT COUNT(*) FROM FINDOC,PASS,PASS,PASS,SELECT COUNT(*) FROM FINDOC,6.19
+hc01,EN,Code-Guarded (RAG Required),How many customers are there?,SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 13,FAIL,PASS,PASS,SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 13;,6.13
+hc02,EL,Code-Guarded (RAG Required),Πόσοι προμηθευτές υπάρχουν;,SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 12,FAIL,PASS,PASS,SELECT COUNT(*) FROM TRDR WHERE SODTYPE = 12,6.84
+hc03,EN,Code-Guarded (RAG Required),How many purchase documents are there?,SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1253,FAIL,FAIL,FAIL,SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = '1253' OR SOSOURCE = '1281';,8.43
+hc04,EN,Code-Guarded (RAG Required),How many sales documents have not been cancelled?,SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1351 AND ISCANCEL = 0,FAIL,FAIL,PASS,SELECT COUNT(*) FROM FINDOC WHERE SOSOURCE = 1351 AND ISCANCEL = 0;,7.37
+hc05,EL,Code-Guarded (RAG Required),Ποιο είναι το συνολικό ποσό των πληρωμών σε προμηθευτές;,"SELECT ROUND(SUM(SUMAMNT), 2) FROM FINDOC WHERE SOSOURCE = 1281",FAIL,FAIL,PASS,"SELECT ROUND(SUM(FINDOC.SUMAMNT), 2) AS total_amount FROM FINDOC WHERE SOSOURCE = 1281 AND SODTYPE = 12;",7.86
+hc06,EN,Code-Guarded (RAG Required),How many service items are there?,SELECT COUNT(*) FROM MTRL WHERE SODTYPE = 52,FAIL,PASS,PASS,SELECT COUNT(*) FROM MTRL WHERE SODTYPE = 52;,7.23

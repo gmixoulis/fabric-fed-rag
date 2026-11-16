@@ -16,23 +16,28 @@ if str(_ROOT) not in sys.path:
 
 from fedrag.ipfs_client import KuboIPFSClient  # noqa: E402
 from fedrag.node_service import make_client_ssl_context, mtls_request  # noqa: E402
+from fedrag.pdf_embedder import build_full_pdf_with_metadata  # noqa: E402
 
 
-def make_minimal_pdf(title: str, body_lines: list[str]) -> bytes:
-    """Create a valid, deterministic PDF-1.4 binary containing the document title and text."""
-    content_text = "\\n".join([title, *body_lines])
-    stream = f"BT /F1 12 Tf 72 720 Td ({content_text}) Tj ET".encode()
-    pdf = (
-        b"%PDF-1.4\n"
-        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
-        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
-        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj\n"
-        + f"4 0 obj << /Length {len(stream)} >> stream\n".encode("ascii")
-        + stream
-        + b"\nendstream endobj\n"
-        b"trailer << /Root 1 0 R >>\n%%EOF\n"
+def make_minimal_pdf(
+    title: str,
+    body_lines: list[str],
+    *,
+    doc_id: str = "doc-000",
+    shard_owner: str = "node1-maestro",
+    metadata_holder: str = "node2-peer",
+    page_count: int = 1,
+) -> bytes:
+    """Create a valid PDF-1.4 binary with embedded `/Info` metadata hashes (`content_sha256`, `chunks_sha256`)."""
+    pdf_bytes, _meta = build_full_pdf_with_metadata(
+        doc_id=doc_id,
+        title=title,
+        shard_owner=shard_owner,
+        metadata_holder=metadata_holder,
+        chunks=body_lines,
+        page_count=page_count,
     )
-    return pdf
+    return pdf_bytes
 
 
 CORPUS_SHARD_1 = [

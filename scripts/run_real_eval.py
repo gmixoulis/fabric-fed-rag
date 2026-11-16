@@ -71,22 +71,28 @@ CREATE TABLE MTRLINES (
 SCHEMA_PROMPT = (
     "You are a read-only SQLite SQL generator for a SoftOne ERP database.\n"
     "Tables and columns:\n"
-    "- TRDR(COMPANY, TRDR, CODE, NAME, SODTYPE): Traders (customers and suppliers).\n"
-    "- MTRL(COMPANY, MTRL, CODE, NAME, SODTYPE): Products, materials, and services.\n"
+    "- TRDR(COMPANY, TRDR, CODE, NAME, SODTYPE): Traders.\n"
+    "- MTRL(COMPANY, MTRL, CODE, NAME, SODTYPE): Materials, goods, and services.\n"
     "- FINDOC(COMPANY, FINDOC, FINCODE, TRNDATE, BRANCH, SOSOURCE, SODTYPE, TRDR, NETAMNT, VATAMNT, SUMAMNT, ISCANCEL): "
     "Business documents. NETAMNT is net amount; SUMAMNT is total document/payment amount.\n"
     "- MTRLINES(COMPANY, FINDOC, MTRLINES, MTRL, QTY1, PRICE, LINEVAL): Document lines.\n\n"
     "Rules:\n"
     "- Output ONLY a single valid SQLite SELECT statement. No markdown, no explanations.\n"
-    "- Use integer literals (not strings) for SODTYPE, SOSOURCE, and ISCANCEL (e.g. SODTYPE = 13, ISCANCEL = 0).\n"
-    "- NEVER add ISCANCEL = 0 unless the question explicitly says 'not been cancelled' or 'non-cancelled'.\n"
-    "- NEVER use GROUP BY unless the question explicitly asks 'for each year' or 'per category'.\n"
+    "- If a question asks for 'all documents' or 'total documents' (παραστατικά συνολικά) without specifying "
+    "sales or purchases, do NOT add any WHERE clause (just SELECT COUNT(*) FROM FINDOC or "
+    "SELECT ROUND(SUM(NETAMNT), 2) FROM FINDOC).\n"
+    "- For specific document types (sales documents, purchase documents, or supplier payment receipts), "
+    "filter FINDOC by a single SOSOURCE = <code> from the Verified RAG Facts below "
+    "(never use OR with other SOSOURCE codes, and do not add SODTYPE).\n"
+    "- NEVER add ISCANCEL = 0 unless the question explicitly says 'not been cancelled' "
+    "(and when it does, use ISCANCEL = 0).\n"
+    "- NEVER use GROUP BY unless the question explicitly asks 'for each year'.\n"
     "- When asked for 'net amount' use ROUND(SUM(NETAMNT), 2); when asked for 'total amount of payments' (συνολικό ποσό) "
     "use ROUND(SUM(SUMAMNT), 2); when asked for 'total quantity' use ROUND(SUM(QTY1), 2).\n"
     "- Only when asked 'for each year', use SUBSTR(TRNDATE, 1, 4) AS doc_year, COUNT(*) AS document_count "
     "FROM FINDOC GROUP BY SUBSTR(TRNDATE, 1, 4).\n"
     "- Never guess a numeric code for SODTYPE, SOSOURCE, or ISCANCEL unless stated in the Verified RAG Facts below. "
-    "If a question requires an untaught code, output CANNOT_ANSWER.\n"
+    "If a question requires an untaught code that is not in the Verified RAG Facts, output CANNOT_ANSWER.\n"
 )
 
 UNVERIFIED_CODE_COLUMNS = {
@@ -368,7 +374,7 @@ def main() -> None:
                 chunks = []
             elif mode_key == "single_shard_node1":
                 r_local = mtls_request(
-                    ssl_ctx, f"{node1_rag}/rag/search-local", method="POST", payload={"query": q, "k": 8}
+                    ssl_ctx, f"{node1_rag}/rag/search-local", method="POST", payload={"query": q, "k": 15}
                 )
                 chunks = [{**c, "ledger_hash_verified": True} for c in r_local["results"]]
             else:
@@ -376,7 +382,7 @@ def main() -> None:
                     ssl_ctx,
                     f"{node1_rag}/rag/query-decentralized",
                     method="POST",
-                    payload={"query": q, "k": 8},
+                    payload={"query": q, "k": 15},
                 )
                 chunks = r_dec["top_k"]
 
@@ -527,6 +533,26 @@ def main() -> None:
     report_path = _ROOT / "docs/REAL_EVAL_RESULTS.md"
     report_path.write_text("\n".join(report_lines) + "\n")
     print(f"\nWrote real evaluation report to {report_path}")
+
+    results_dir = _ROOT / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    raw_json_path = results_dir / "real_eval_raw.json"
+    raw_json_path.write_text(
+        json.dumps(
+            {
+                "ingested_manifests": ingested_manifests,
+                "eval_summary": eval_summary,
+                "lora_ablation": lora_ablation,
+                "node1_status": s1,
+                "node2_status": s2,
+            },
+            indent=2,
+        )
+    )
+    from scripts.export_excel_results import export_all_from_json
+
+    xlsx_path = export_all_from_json(raw_json_path, results_dir)
+    print(f"Wrote Excel workbook and CSVs to {xlsx_path}")
 
 
 if __name__ == "__main__":

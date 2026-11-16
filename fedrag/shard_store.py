@@ -17,6 +17,13 @@ import numpy as np
 
 from fedrag.embed import top_k
 from fedrag.ipfs_client import compute_cidv1_raw
+from fedrag.pdf_embedder import (
+    PDFEmbedder,
+    build_metadata_stub_pdf,
+    compute_chunks_sha256,
+    compute_content_sha256,
+    extract_and_validate_pdf,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -26,7 +33,9 @@ CREATE TABLE IF NOT EXISTS documents (
     metadata_holder TEXT NOT NULL,
     ipfs_cid        TEXT NOT NULL DEFAULT '',
     pdf_sha256      TEXT NOT NULL,
+    content_sha256  TEXT NOT NULL DEFAULT '',
     chunks_sha256   TEXT NOT NULL,
+    stub_pdf_sha256 TEXT NOT NULL DEFAULT '',
     page_count      INTEGER NOT NULL,
     num_chunks      INTEGER NOT NULL,
     is_metadata_only INTEGER NOT NULL CHECK (is_metadata_only IN (0, 1)),
@@ -67,13 +76,6 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def compute_chunks_sha256(chunks: list[str]) -> str:
-    h = hashlib.sha256()
-    for index, text in enumerate(chunks):
-        h.update(f"{index}:{text}\n".encode())
-    return h.hexdigest()
-
-
 class ShardedRAGStore:
     """SQLite + filesystem store for one peer node in the 50/50 sharded RAG network."""
 
@@ -84,6 +86,7 @@ class ShardedRAGStore:
         self.backups_dir = self.root_dir / "backups"
         self.db_path = self.root_dir / "rag_shard.sqlite"
         self.embedder = embedder
+        self.pdf_embedder = PDFEmbedder(embedder)
 
         self.pdfs_dir.mkdir(parents=True, exist_ok=True)
         self.backups_dir.mkdir(parents=True, exist_ok=True)
@@ -106,30 +109,42 @@ class ShardedRAGStore:
         shard_owner: str,
         metadata_holder: str,
         pdf_bytes: bytes,
-        chunks: list[str],
-        page_count: int,
+        chunks: list[str] | None = None,
+        page_count: int = 1,
         ipfs_cid: str | None = None,
         training_pairs: list[dict[str, str]] | None = None,
         extra_metadata: dict | None = None,
     ) -> dict:
-        """Store a full PDF + chunks + embeddings + training examples (this node's 50% shard)."""
-        pdf_hash = sha256_bytes(pdf_bytes)
+        """Validate PDF metadata hashes, extract/embed chunks via PDFEmbedder, and store in active 50% shard."""
+        artifact = self.pdf_embedder.embed_pdf_bytes(
+            pdf_bytes, fallback_chunks=chunks
+        )
+        resolved_chunks = chunks if chunks is not None else artifact.chunks
+        pdf_hash = artifact.pdf_sha256
+        content_hash = compute_content_sha256(resolved_chunks)
+        chunks_hash = compute_chunks_sha256(resolved_chunks)
         cid = ipfs_cid or compute_cidv1_raw(pdf_bytes)
-        chunks_hash = compute_chunks_sha256(chunks)
+
         pdf_file = self.pdfs_dir / f"{doc_id}.pdf"
         pdf_file.write_bytes(pdf_bytes)
 
-        vectors = self.embedder.embed(chunks) if chunks else np.zeros((0, 0), dtype=np.float64)
-        embed_model = getattr(self.embedder, "model", type(self.embedder).__name__)
+        vectors = (
+            self.embedder.embed(resolved_chunks)
+            if resolved_chunks
+            else np.zeros((0, 0), dtype=np.float64)
+        )
+        embed_model = self.pdf_embedder.model_name
 
         meta = {
             "doc_id": doc_id,
             "title": title,
             "page_count": page_count,
-            "num_chunks": len(chunks),
+            "num_chunks": len(resolved_chunks),
             "ipfs_cid": cid,
             "pdf_sha256": pdf_hash,
+            "content_sha256": content_hash,
             "chunks_sha256": chunks_hash,
+            "internal_hash_verified": artifact.internal_hash_verified,
             **(extra_metadata or {}),
         }
 
@@ -137,9 +152,10 @@ class ShardedRAGStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO documents
-                (doc_id, title, shard_owner, metadata_holder, ipfs_cid, pdf_sha256, chunks_sha256,
-                 page_count, num_chunks, is_metadata_only, pdf_path, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                (doc_id, title, shard_owner, metadata_holder, ipfs_cid, pdf_sha256,
+                 content_sha256, chunks_sha256, stub_pdf_sha256, page_count, num_chunks,
+                 is_metadata_only, pdf_path, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 0, ?, ?)
                 """,
                 (
                     doc_id,
@@ -148,15 +164,16 @@ class ShardedRAGStore:
                     metadata_holder,
                     cid,
                     pdf_hash,
+                    content_hash,
                     chunks_hash,
                     page_count,
-                    len(chunks),
+                    len(resolved_chunks),
                     str(pdf_file),
                     json.dumps(meta),
                 ),
             )
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
-            for index, text in enumerate(chunks):
+            for index, text in enumerate(resolved_chunks):
                 vec_bytes = np.ascontiguousarray(vectors[index], dtype=np.float64).tobytes()
                 conn.execute(
                     """
@@ -193,27 +210,37 @@ class ShardedRAGStore:
             "metadata_holder": metadata_holder,
             "ipfs_cid": cid,
             "pdf_sha256": pdf_hash,
+            "content_sha256": content_hash,
             "chunks_sha256": chunks_hash,
-            "num_chunks": len(chunks),
+            "num_chunks": len(resolved_chunks),
             "page_count": page_count,
         }
 
     def ingest_metadata_stub(self, manifest: dict) -> dict:
-        """Store ONLY the PDF metadata + verified CID & SHA-256 hashes (the other node's 50% shard)."""
+        """Build & validate a Metadata-Only Stub PDF carrying the verified hashes for the other 50% shard."""
         doc_id = manifest["doc_id"]
         pdf_hash = manifest["pdf_sha256"]
         chunks_hash = manifest["chunks_sha256"]
+        content_hash = manifest.get("content_sha256") or chunks_hash
         cid = manifest.get("ipfs_cid", "")
         if len(pdf_hash) != 64 or len(chunks_hash) != 64:
             raise ValueError(f"Invalid SHA-256 hash in metadata stub for {doc_id}")
+
+        stub_bytes, stub_meta = build_metadata_stub_pdf(manifest)
+        validated = extract_and_validate_pdf(
+            stub_bytes, expected_pdf_sha256=stub_meta["stub_pdf_sha256"]
+        )
+        stub_file = self.pdfs_dir / f"{doc_id}.stub.pdf"
+        stub_file.write_bytes(stub_bytes)
 
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO documents
-                (doc_id, title, shard_owner, metadata_holder, ipfs_cid, pdf_sha256, chunks_sha256,
-                 page_count, num_chunks, is_metadata_only, pdf_path, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?)
+                (doc_id, title, shard_owner, metadata_holder, ipfs_cid, pdf_sha256,
+                 content_sha256, chunks_sha256, stub_pdf_sha256, page_count, num_chunks,
+                 is_metadata_only, pdf_path, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 """,
                 (
                     doc_id,
@@ -222,10 +249,13 @@ class ShardedRAGStore:
                     manifest["metadata_holder"],
                     cid,
                     pdf_hash,
+                    content_hash,
                     chunks_hash,
+                    validated["stub_pdf_sha256"],
                     int(manifest["page_count"]),
                     int(manifest["num_chunks"]),
-                    json.dumps(manifest),
+                    str(stub_file),
+                    json.dumps({**manifest, **stub_meta}),
                 ),
             )
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
@@ -234,6 +264,11 @@ class ShardedRAGStore:
             "is_metadata_only": True,
             "ipfs_cid": cid,
             "pdf_sha256": pdf_hash,
+            "content_sha256": content_hash,
+            "chunks_sha256": chunks_hash,
+            "stub_pdf_sha256": validated["stub_pdf_sha256"],
+            "stub_pdf_path": str(stub_file),
+            "internal_hash_verified": validated["internal_hash_verified"],
         }
 
     def store_and_verify_backup(
@@ -324,11 +359,11 @@ class ShardedRAGStore:
     def summary(self) -> dict:
         with self._connect() as conn:
             full_docs = conn.execute(
-                "SELECT doc_id, title, ipfs_cid, pdf_sha256, num_chunks "
+                "SELECT doc_id, title, ipfs_cid, pdf_sha256, content_sha256, chunks_sha256, num_chunks "
                 "FROM documents WHERE is_metadata_only = 0 ORDER BY doc_id"
             ).fetchall()
             stub_docs = conn.execute(
-                "SELECT doc_id, title, ipfs_cid, pdf_sha256, shard_owner "
+                "SELECT doc_id, title, ipfs_cid, pdf_sha256, stub_pdf_sha256, pdf_path, shard_owner "
                 "FROM documents WHERE is_metadata_only = 1 ORDER BY doc_id"
             ).fetchall()
             backups = conn.execute(
