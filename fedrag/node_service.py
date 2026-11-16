@@ -171,11 +171,12 @@ class NodeApp:
 
     def train_local_round(self, body: dict) -> dict:
         round_id = int(body["round_id"])
-        round_dir = self.rounds_dir / f"round-{round_id}" / self.node_id
+        lora_mode = str(body.get("lora_mode", "fedavg")).lower()
+        round_dir = self.rounds_dir / f"{lora_mode}-round-{round_id}" / self.node_id
         global_dir = None
         if body.get("global_adapter_b64"):
             global_state = deserialize_state_b64(body["global_adapter_b64"])
-            global_dir = self.rounds_dir / f"round-{round_id}" / "global-init"
+            global_dir = self.rounds_dir / f"{lora_mode}-round-{round_id}" / "global-init"
             save_adapter_npz(global_dir, global_state, {"round_id": round_id - 1})
 
         examples = self.store.export_training_shard()
@@ -186,6 +187,7 @@ class NodeApp:
             examples=examples,
             out_dir=round_dir,
             global_adapter_dir=global_dir,
+            config={"lora_mode": lora_mode},
         )
         state, _ = load_adapter_npz(round_dir)
 
@@ -193,6 +195,7 @@ class NodeApp:
             "round_id": round_id,
             "node_id": self.node_id,
             "shard_id": self.shard_id,
+            "lora_mode": lora_mode,
             "adapter_sha256": result["adapter_sha256"],
             "num_examples": result["num_examples"],
             "first_loss": result["first_loss"],
@@ -208,15 +211,18 @@ class NodeApp:
     def coordinate_federated_round(self, body: dict) -> dict:
         """Maestro coordinator: train on local Shard 1 + remote Shard 2 over mTLS, verify hashes, run FedAvg."""
         round_id = int(body["round_id"])
+        lora_mode = str(body.get("lora_mode", "fedavg")).lower()
         global_b64 = None
         if round_id > 1:
-            prev_global = self.rounds_dir / f"round-{round_id - 1}" / "global-final"
+            prev_global = self.rounds_dir / f"{lora_mode}-round-{round_id - 1}" / "global-final"
             if prev_global.exists():
                 prev_state, _ = load_adapter_npz(prev_global)
                 global_b64 = serialize_state_b64(prev_state)
 
         # 1. Train on Maestro's local Shard 1
-        local_res = self.train_local_round({"round_id": round_id, "global_adapter_b64": global_b64})
+        local_res = self.train_local_round(
+            {"round_id": round_id, "lora_mode": lora_mode, "global_adapter_b64": global_b64}
+        )
         local_state = deserialize_state_b64(local_res["adapter_b64"])
 
         # 2. Train on Peer's Shard 2 over mTLS
@@ -224,7 +230,7 @@ class NodeApp:
             self.ssl_client_ctx,
             f"{self.peer_url}/fed/train-local",
             method="POST",
-            payload={"round_id": round_id, "global_adapter_b64": global_b64},
+            payload={"round_id": round_id, "lora_mode": lora_mode, "global_adapter_b64": global_b64},
         )
         peer_state = deserialize_state_b64(peer_res["adapter_b64"])
 
@@ -241,7 +247,7 @@ class NodeApp:
                 (peer_state, float(peer_res["num_examples"])),
             ]
         )
-        global_dir = self.rounds_dir / f"round-{round_id}" / "global-final"
+        global_dir = self.rounds_dir / f"{lora_mode}-round-{round_id}" / "global-final"
         total_examples = int(local_res["num_examples"]) + int(peer_res["num_examples"])
         weighted_loss = (
             float(local_res["last_loss"]) * int(local_res["num_examples"])
@@ -253,14 +259,16 @@ class NodeApp:
             global_state,
             {
                 "round_id": round_id,
+                "lora_mode": lora_mode,
                 "total_examples": total_examples,
                 "weighted_loss": round(weighted_loss, 6),
             },
         )
 
-        # 5. Commit LORA_ROUND_FINALIZE to Go Raft ledger (chaincode verifies client hashes)
+        # 5. Commit LORA_ROUND_FINALIZE to Raft ledger (chaincode verifies client hashes)
         finalize_payload = {
             "round_id": round_id,
+            "lora_mode": lora_mode,
             "global_adapter_sha256": global_sha,
             "participant_hashes": {
                 local_res["node_id"]: local_res["adapter_sha256"],
@@ -273,6 +281,7 @@ class NodeApp:
 
         return {
             "round_id": round_id,
+            "lora_mode": lora_mode,
             "global_adapter_sha256": global_sha,
             "total_examples": total_examples,
             "weighted_loss": round(weighted_loss, 6),

@@ -23,15 +23,24 @@ See [`docs/RESEARCH_PLAN.md`](docs/RESEARCH_PLAN.md) for the full research plan,
    - Supports both standard `fedavg` LoRA and `ffa` (*FFA-LoRA*, `arXiv:2403.12313`, freezing deterministically seeded `lora_A` and training/averaging `lora_B`).
    - Full CUDA (`train-safe`) and Apple Silicon MPS (`torch.mps.set_per_process_memory_fraction` + RSS watchdog) trainers ported from `softone-rag` live in `fedrag/hw_training/`.
 
-## Quick Start (2-Docker mTLS Demo on MacBook Air M4)
+## Quick Start (`./run.sh` CLI)
+
+You can run the full pipeline at once or run individual commands step-by-step:
 
 ```bash
-# 1. Generate X.509 CA and mTLS certificates for node1-maestro and node2-peer
-python3 -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer
+# Run everything end-to-end (certs -> build -> up -> ingest -> train -> query -> tamper -> status)
+./run.sh all
 
-# 2. Build and start the 2 connected Docker containers
-docker compose up -d --build
-
-# 3. Run the end-to-end 50/50 sharding, backup check, 3-round Federated LoRA & RAG test
-python3 scripts/run_demo.py
+# Or run individual commands each time:
+./run.sh certs                                           # Generate X.509 CA & node mTLS certificates
+./run.sh build                                           # Build Docker images for node1-maestro & node2-peer
+./run.sh up                                              # Start the 2 connected mTLS Docker containers
+./run.sh ingest                                          # Ingest 50/50 sharded PDFs, SHA-256 stubs & backups
+./run.sh train 3 fedavg                                  # Run 3 rounds of standard FedAvg-LoRA
+./run.sh train 3 ffa                                     # Run 3 rounds of FFA-LoRA (Freeze-A, arXiv:2403.12313)
+./run.sh query "Which SODTYPE code identifies customers?" # Decentralized scatter-gather RAG query
+./run.sh tamper                                          # Test Raft rejection of a corrupted backup hash
+./run.sh status                                          # Check 50/50 shard counts, backups & Raft height
+./run.sh ledger                                          # Print the full Raft block ledger JSON
+./run.sh down                                            # Stop and clean up containers & volumes
 ```

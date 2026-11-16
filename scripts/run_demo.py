@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""End-to-end verification and demo script for the 2-Docker-node mTLS Raft + Federated LoRA + 50/50 Sharded RAG testbed."""
+"""Modular CLI & End-to-End Demo Runner for the 2-Docker-Node mTLS Raft + Sharded RAG + Federated LoRA cluster."""
 
 from __future__ import annotations
 
 import argparse
 import base64
+import json
 import sys
 import time
 from pathlib import Path
@@ -170,24 +171,7 @@ def wait_for_nodes(ssl_ctx, urls: list[str], timeout_s: float = 30.0) -> None:
                 time.sleep(0.5)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run 2-Docker-node mTLS Federated LoRA & Sharded RAG Demo")
-    parser.add_argument("--node1-rag", default="https://localhost:18443")
-    parser.add_argument("--node2-rag", default="https://localhost:28443")
-    parser.add_argument("--node1-raft", default="https://localhost:17050")
-    parser.add_argument("--node2-raft", default="https://localhost:27050")
-    parser.add_argument("--certs-dir", default="./certs")
-    parser.add_argument("--rounds", type=int, default=3)
-    args = parser.parse_args()
-
-    certs = Path(args.certs_dir)
-    ssl_ctx = make_client_ssl_context(
-        str(certs / "ca.crt"),
-        str(certs / "node1-maestro.crt"),
-        str(certs / "node1-maestro.key"),
-    )
-
-    print("1. Waiting for mTLS Go Raft & Python RAG nodes...")
+def action_health(ssl_ctx, args) -> None:
     wait_for_nodes(
         ssl_ctx,
         [
@@ -202,7 +186,9 @@ def main() -> None:
     print(f"   - node1-maestro Raft role={h1['role']}, client_cn={h1['verified_client_cn']}")
     print(f"   - node2-peer    Raft role={h2['role']}, client_cn={h2['verified_client_cn']}")
 
-    print("\n2. Ingesting 50/50 Sharded PDFs + Embeddings + Cross-Node Backups over mTLS...")
+
+def action_ingest(ssl_ctx, args) -> None:
+    print("Ingesting 50/50 Sharded PDFs + Embeddings + Cross-Node Backups over mTLS...")
     for doc in CORPUS_SHARD_1:
         pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
         res = mtls_request(
@@ -239,30 +225,39 @@ def main() -> None:
             f"sha256={res['manifest']['pdf_sha256'][:12]}...)"
         )
 
-    print("\n3. Running Federated LoRA Training Rounds across Node 1 (Shard 1) & Node 2 (Shard 2)...")
-    round_summaries = []
+
+def action_train(ssl_ctx, args) -> None:
+    print(
+        f"Running {args.rounds} Federated LoRA Training Rounds "
+        f"(mode={args.lora_mode}) across Node 1 (Shard 1) & Node 2 (Shard 2)..."
+    )
     for r in range(1, args.rounds + 1):
         round_res = mtls_request(
             ssl_ctx,
             f"{args.node1_rag}/fed/run-round",
             method="POST",
-            payload={"round_id": r},
+            payload={"round_id": r, "lora_mode": args.lora_mode},
         )
-        round_summaries.append(round_res)
         c1, c2 = round_res["clients"][0], round_res["clients"][1]
         print(
-            f"   [Round {r}] "
+            f"   [Round {r} | {args.lora_mode}] "
             f"{c1['node_id']} loss {c1['first_loss']:.4f} -> {c1['last_loss']:.4f} ({c1['num_examples']} ex) | "
             f"{c2['node_id']} loss {c2['first_loss']:.4f} -> {c2['last_loss']:.4f} ({c2['num_examples']} ex) | "
             f"FedAvg weighted_loss={round_res['weighted_loss']:.4f} | "
             f"global_sha256={round_res['global_adapter_sha256'][:12]}... (Raft block #{round_res['raft_block_index']})"
         )
 
-    print("\n4. Testing Decentralized Scatter-Gather RAG Queries across Both Shards...")
-    queries = [
-        "Which SODTYPE code identifies customer records in TRDR?",
-        "What SOSOURCE code is used for purchase invoices from suppliers in FINDOC?",
-    ]
+
+def action_query(ssl_ctx, args) -> None:
+    queries = (
+        [args.query]
+        if args.query
+        else [
+            "Which SODTYPE code identifies customer records in TRDR?",
+            "What SOSOURCE code is used for purchase invoices from suppliers in FINDOC?",
+        ]
+    )
+    print("Running Decentralized Scatter-Gather RAG Queries across Both Shards...")
     for q in queries:
         q_res = mtls_request(
             ssl_ctx,
@@ -277,7 +272,9 @@ def main() -> None:
             f"     -> Cosine Score={top['score']} | On-Chain SHA-256 Verified={top['ledger_hash_verified']}"
         )
 
-    print("\n5. Verifying Tamper Rejection on Go Raft Ledger...")
+
+def action_tamper(ssl_ctx, args) -> None:
+    print("Verifying Tamper Rejection on Raft Ledger...")
     tampered_rejected = False
     try:
         mtls_request(
@@ -301,6 +298,8 @@ def main() -> None:
     if not tampered_rejected:
         raise RuntimeError("Expected tampered backup checksum to be rejected!")
 
+
+def action_status(ssl_ctx, args) -> None:
     s1 = mtls_request(ssl_ctx, f"{args.node1_rag}/status")
     s2 = mtls_request(ssl_ctx, f"{args.node2_rag}/status")
     h1_end = s1["raft"]["ledger"]["height"]
@@ -308,7 +307,7 @@ def main() -> None:
     hash1 = s1["raft"]["ledger"]["last_hash"]
     hash2 = s2["raft"]["ledger"]["last_hash"]
 
-    print("\n6. Final Cluster Consistency Check:")
+    print("Cluster Consistency & Storage Check:")
     print(
         f"   - node1-maestro: full_docs={len(s1['rag_store']['full_shard_documents'])}, "
         f"metadata_stubs={len(s1['rag_store']['metadata_only_stubs'])}, "
@@ -322,7 +321,65 @@ def main() -> None:
         f"raft_height={h2_end}, tip_hash={hash2[:16]}..."
     )
     assert h1_end == h2_end and hash1 == hash2, "Raft ledger state diverged between nodes!"
-    print("\nSUCCESS: 2-Docker mTLS Raft + 50/50 Sharded RAG + Federated LoRA test passed!")
+
+
+def action_ledger(ssl_ctx, args) -> None:
+    snap = mtls_request(ssl_ctx, f"{args.node1_raft}/ledger")
+    print(json.dumps(snap, indent=2))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run 2-Docker-node mTLS Federated LoRA & Sharded RAG CLI")
+    parser.add_argument(
+        "--action",
+        default="all",
+        choices=("all", "health", "ingest", "train", "query", "tamper", "status", "ledger"),
+    )
+    parser.add_argument("--node1-rag", default="https://localhost:18443")
+    parser.add_argument("--node2-rag", default="https://localhost:28443")
+    parser.add_argument("--node1-raft", default="https://localhost:17050")
+    parser.add_argument("--node2-raft", default="https://localhost:27050")
+    parser.add_argument("--certs-dir", default="./certs")
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--lora-mode", default="fedavg", choices=("fedavg", "ffa"))
+    parser.add_argument("--query", default="")
+    args = parser.parse_args()
+
+    certs = Path(args.certs_dir)
+    ssl_ctx = make_client_ssl_context(
+        str(certs / "ca.crt"),
+        str(certs / "node1-maestro.crt"),
+        str(certs / "node1-maestro.key"),
+    )
+
+    if args.action == "health":
+        action_health(ssl_ctx, args)
+    elif args.action == "ingest":
+        action_ingest(ssl_ctx, args)
+    elif args.action == "train":
+        action_train(ssl_ctx, args)
+    elif args.action == "query":
+        action_query(ssl_ctx, args)
+    elif args.action == "tamper":
+        action_tamper(ssl_ctx, args)
+    elif args.action == "status":
+        action_status(ssl_ctx, args)
+    elif args.action == "ledger":
+        action_ledger(ssl_ctx, args)
+    elif args.action == "all":
+        print("1. Waiting for mTLS Raft & Python RAG nodes...")
+        action_health(ssl_ctx, args)
+        print()
+        action_ingest(ssl_ctx, args)
+        print()
+        action_train(ssl_ctx, args)
+        print()
+        action_query(ssl_ctx, args)
+        print()
+        action_tamper(ssl_ctx, args)
+        print()
+        action_status(ssl_ctx, args)
+        print("\nSUCCESS: 2-Docker mTLS Raft + 50/50 Sharded RAG + Federated LoRA test passed!")
 
 
 if __name__ == "__main__":
