@@ -26,7 +26,8 @@ Design, implement, and benchmark a decentralized edge-LLM architecture combining
 - **C-FedRAG: A Confidential Federated RAG System** (`arXiv:2412.13163`, Dec 2024): Combines NVIDIA FLARE with confidential computing enclaves for cross-silo RAG.
 - **FedE4RAG** (`arXiv:2504.19101`, Apr 2025) & **FD-RAG** (`arXiv:2605.27432`, May 2026): Federated embedding learning (`FedE4RAG`) and dual-system hypergraph memory over fragmented edge corpora (`FD-RAG`).
 
-### C. Federated LoRA Across Heterogeneous Edge Hardware & Quantization
+### C. Federated & Decentralized LoRA Across Heterogeneous Edge Hardware
+- **TAD-LoRA: Topology-Aware Decentralized LoRA** (`arXiv:2602.00451`, Feb 2026) & **Dec-LoRA: Decentralized LoRA for LLMs** (`arXiv:2501.15361`, Jan 2025): Peer-to-peer and decentralized LoRA fine-tuning under non-convex loss, quantization constraints, and cross-term misalignment.
 - **FFA-LoRA: Improving LoRA in Privacy-Preserving Federated Learning** (`arXiv:2403.12313`, ICLR 2024): Demonstrates that averaging both $A$ and $B$ in LoRA introduces cross-term interference ($\bar{B}\bar{A} \neq \frac{1}{N}\sum B_i A_i$); freezing deterministically seeded $A$ (`lora_A`) and training/averaging only $B$ (`lora_B`) removes aggregation noise and halves communication cost.
 - **FlexLoRA / HetLoRA** (`arXiv:2402.11505`, ACL/EMNLP 2024) & **FLoRA** (`arXiv:2409.05976`, NeurIPS 2024): Aggregation schemes for clients with heterogeneous LoRA ranks and memory budgets.
 - **FAH-QLoRA** & **HAFLQ** (2024–2025): Federated QLoRA across heterogeneously quantized base models (e.g., 4-bit NF4 on one node and bf16 on another).
