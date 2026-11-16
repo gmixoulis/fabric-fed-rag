@@ -20,6 +20,7 @@ export interface DocManifest {
   title: string;
   shard_owner: string;
   metadata_holder: string;
+  ipfs_cid?: string;
   pdf_sha256: string;
   chunks_sha256: string;
   num_chunks: number;
@@ -30,6 +31,7 @@ export interface BackupAttestation {
   doc_id: string;
   source_node: string;
   backup_node: string;
+  ipfs_cid?: string;
   computed_sha256: string;
   verified: boolean;
 }
@@ -39,6 +41,7 @@ export interface LoRAClientSubmission {
   node_id: string;
   shard_id: string;
   lora_mode?: "fedavg" | "ffa";
+  adapter_cid?: string;
   adapter_sha256: string;
   num_examples: number;
   first_loss: number;
@@ -48,6 +51,7 @@ export interface LoRAClientSubmission {
 export interface LoRARoundFinalized {
   round_id: number;
   lora_mode?: "fedavg" | "ffa";
+  global_adapter_cid?: string;
   global_adapter_sha256: string;
   participant_hashes: Record<string, string>;
   total_examples: number;

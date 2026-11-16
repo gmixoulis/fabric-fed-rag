@@ -5,8 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from fedrag.certgen import generate_swarm_key
 from fedrag.embed import HashEmbedder
 from fedrag.fedavg import adapter_sha256, average_adapters, load_adapter_npz
+from fedrag.ipfs_client import LocalCIDStore, compute_cidv1_raw
 from fedrag.raft_ledger import LedgerState
 from fedrag.shard_store import ShardedRAGStore
 from fedrag.trainer import train_local_lora_round
@@ -133,3 +135,19 @@ def test_raft_ledger_chaincode_validation(tmp_path):
                 "computed_sha256": "c" * 64,
             },
         )
+
+
+def test_ipfs_cidv1_and_private_swarm_key(tmp_path):
+    store = LocalCIDStore("node1")
+    payload = b"%PDF-1.4 Private Kubo Swarm Test %%EOF"
+    cid = store.add_bytes(payload, "doc.pdf", pin=True)
+    assert cid.startswith("bafkrei")
+    assert cid == compute_cidv1_raw(payload)
+    assert store.cat_bytes(cid) == payload
+    assert cid in store.pin_ls()
+
+    swarm_key = generate_swarm_key(tmp_path)
+    lines = swarm_key.read_text().strip().splitlines()
+    assert lines[0] == "/key/swarm/psk/1.0.0/"
+    assert lines[1] == "/base16/"
+    assert len(lines[2]) == 64

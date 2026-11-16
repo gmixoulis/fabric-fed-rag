@@ -23,6 +23,7 @@ import numpy as np
 
 from fedrag.embed import HashEmbedder, OllamaEmbedder
 from fedrag.fedavg import adapter_sha256, average_adapters, load_adapter_npz, save_adapter_npz
+from fedrag.ipfs_client import KuboIPFSClient, LocalCIDStore
 from fedrag.shard_store import ShardedRAGStore
 from fedrag.trainer import train_local_lora_round
 
@@ -90,6 +91,7 @@ class NodeApp:
         cert_file: str,
         key_file: str,
         embedder,
+        ipfs_client=None,
     ) -> None:
         self.node_id = node_id
         self.shard_id = shard_id
@@ -98,6 +100,7 @@ class NodeApp:
         self.peer_url = peer_url.rstrip("/") if peer_url else ""
         self.ssl_client_ctx = make_client_ssl_context(ca_file, cert_file, key_file)
         self.store = ShardedRAGStore(node_id=node_id, root_dir=self.data_dir / "rag", embedder=embedder)
+        self.ipfs = ipfs_client if ipfs_client is not None else LocalCIDStore(node_id)
         self.rounds_dir = self.data_dir / "rounds"
         self.rounds_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,20 +118,26 @@ class NodeApp:
     def ingest_full_and_replicate(self, body: dict) -> dict:
         pdf_bytes = base64.b64decode(body["pdf_base64"].encode("ascii"))
         metadata_holder = body.get("metadata_holder") or "node2-peer"
+        doc_id = body["doc_id"]
+
+        # 0. Pin full PDF to local Kubo IPFS node (Private Swarm) and get cryptographic CID
+        ipfs_cid = self.ipfs.add_bytes(pdf_bytes, filename=f"{doc_id}.pdf", pin=True)
+
         manifest = self.store.ingest_full_document(
-            doc_id=body["doc_id"],
+            doc_id=doc_id,
             title=body["title"],
             shard_owner=self.node_id,
             metadata_holder=metadata_holder,
             pdf_bytes=pdf_bytes,
             chunks=body["chunks"],
             page_count=int(body.get("page_count", 1)),
+            ipfs_cid=ipfs_cid,
             training_pairs=body.get("training_pairs", []),
         )
-        # 1. Commit document manifest + SHA-256 hashes to Go Raft ledger
+        # 1. Commit document manifest + IPFS CID + SHA-256 hashes to Raft ledger
         raft_entry = self.propose_raft_tx("DOC_MANIFEST", manifest)
 
-        # 2. Send metadata-only stub (with SHA-256 hash) to the other peer over mTLS
+        # 2. Send metadata-only stub (with IPFS CID + SHA-256 hash) to the other peer over mTLS
         stub_ack = None
         backup_ack = None
         if self.peer_url:
@@ -138,7 +147,7 @@ class NodeApp:
                 method="POST",
                 payload=manifest,
             )
-            # 3. Send backup PDF replica to the other peer for checksum verification & backup storage
+            # 3. Trigger peer backup pin & SHA-256 checksum verification
             backup_ack = mtls_request(
                 self.ssl_client_ctx,
                 f"{self.peer_url}/shard/store-backup",
@@ -146,6 +155,7 @@ class NodeApp:
                 payload={
                     "doc_id": manifest["doc_id"],
                     "source_node": self.node_id,
+                    "ipfs_cid": ipfs_cid,
                     "pdf_base64": body["pdf_base64"],
                     "expected_sha256": manifest["pdf_sha256"],
                 },
@@ -159,12 +169,28 @@ class NodeApp:
         }
 
     def store_backup_and_attest(self, body: dict) -> dict:
-        pdf_bytes = base64.b64decode(body["pdf_base64"].encode("ascii"))
+        ipfs_cid = body.get("ipfs_cid", "")
+        if ipfs_cid:
+            try:
+                self.ipfs.pin_add(ipfs_cid)
+            except Exception:
+                if body.get("pdf_base64"):
+                    raw_fallback = base64.b64decode(body["pdf_base64"].encode("ascii"))
+                    self.ipfs.add_bytes(raw_fallback, filename=f"{body['doc_id']}.backup.pdf", pin=True)
+
+        if body.get("pdf_base64"):
+            pdf_bytes = base64.b64decode(body["pdf_base64"].encode("ascii"))
+        elif ipfs_cid:
+            pdf_bytes = self.ipfs.cat_bytes(ipfs_cid)
+        else:
+            raise ValueError("store_backup requires either ipfs_cid or pdf_base64")
+
         attestation = self.store.store_and_verify_backup(
             doc_id=body["doc_id"],
             source_node=body["source_node"],
             pdf_bytes=pdf_bytes,
             expected_sha256=body["expected_sha256"],
+            ipfs_cid=ipfs_cid,
         )
         raft_entry = self.propose_raft_tx("BACKUP_CHECK", attestation)
         return {**attestation, "raft_block_index": raft_entry["index"]}
@@ -190,12 +216,17 @@ class NodeApp:
             config={"lora_mode": lora_mode},
         )
         state, _ = load_adapter_npz(round_dir)
+        adapter_bytes = (round_dir / "adapter_model.npz").read_bytes()
+        adapter_cid = self.ipfs.add_bytes(
+            adapter_bytes, filename=f"{self.node_id}-r{round_id}.npz", pin=True
+        )
 
         submission = {
             "round_id": round_id,
             "node_id": self.node_id,
             "shard_id": self.shard_id,
             "lora_mode": lora_mode,
+            "adapter_cid": adapter_cid,
             "adapter_sha256": result["adapter_sha256"],
             "num_examples": result["num_examples"],
             "first_loss": result["first_loss"],
@@ -204,6 +235,7 @@ class NodeApp:
         raft_entry = self.propose_raft_tx("LORA_CLIENT_SUBMIT", submission)
         return {
             **result,
+            "adapter_cid": adapter_cid,
             "raft_block_index": raft_entry["index"],
             "adapter_b64": serialize_state_b64(state),
         }
@@ -264,11 +296,16 @@ class NodeApp:
                 "weighted_loss": round(weighted_loss, 6),
             },
         )
+        global_bytes = (global_dir / "adapter_model.npz").read_bytes()
+        global_cid = self.ipfs.add_bytes(
+            global_bytes, filename=f"global-{lora_mode}-r{round_id}.npz", pin=True
+        )
 
         # 5. Commit LORA_ROUND_FINALIZE to Raft ledger (chaincode verifies client hashes)
         finalize_payload = {
             "round_id": round_id,
             "lora_mode": lora_mode,
+            "global_adapter_cid": global_cid,
             "global_adapter_sha256": global_sha,
             "participant_hashes": {
                 local_res["node_id"]: local_res["adapter_sha256"],
@@ -282,6 +319,7 @@ class NodeApp:
         return {
             "round_id": round_id,
             "lora_mode": lora_mode,
+            "global_adapter_cid": global_cid,
             "global_adapter_sha256": global_sha,
             "total_examples": total_examples,
             "weighted_loss": round(weighted_loss, 6),
@@ -352,6 +390,10 @@ def build_handler(app: NodeApp):
                         200,
                         {
                             "rag_store": app.store.summary(),
+                            "ipfs": {
+                                "mode": getattr(app.ipfs, "mode", "unknown"),
+                                "pins": app.ipfs.pin_ls(),
+                            },
                             "raft": app.get_raft_ledger(),
                         },
                     )
@@ -398,6 +440,19 @@ def select_embedder():
     return HashEmbedder()
 
 
+def select_ipfs_client(node_id: str):
+    api_url = os.environ.get("FEDRAG_IPFS_API_URL", "").strip()
+    if api_url:
+        client = KuboIPFSClient(api_url=api_url)
+        try:
+            client.id_info()
+            return client
+        except Exception as exc:
+            print(f"[node_service] Kubo at {api_url} not ready yet ({exc}), using KuboIPFSClient lazy mode", flush=True)
+            return client
+    return LocalCIDStore(node_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="FabricFedRAG mTLS Node Service")
     parser.add_argument("--node-id", required=True)
@@ -412,6 +467,7 @@ def main() -> None:
     args = parser.parse_args()
 
     embedder = select_embedder()
+    ipfs_client = select_ipfs_client(args.node_id)
     app = NodeApp(
         node_id=args.node_id,
         shard_id=args.shard_id,
@@ -422,6 +478,7 @@ def main() -> None:
         cert_file=args.cert,
         key_file=args.key,
         embedder=embedder,
+        ipfs_client=ipfs_client,
     )
 
     server = ThreadingHTTPServer(("0.0.0.0", args.listen_port), build_handler(app))

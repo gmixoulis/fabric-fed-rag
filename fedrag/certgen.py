@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import secrets
 import subprocess
 import tempfile
 from pathlib import Path
+
+
+def generate_swarm_key(out_dir: Path) -> Path:
+    """Generate a 256-bit Private IPFS Swarm PSK (swarm.key) for LIBP2P_FORCE_PNET=1."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    swarm_key_path = out_dir / "swarm.key"
+    psk_hex = secrets.token_hex(32)
+    swarm_key_path.write_text(f"/key/swarm/psk/1.0.0/\n/base16/\n{psk_hex}\n")
+    swarm_key_path.chmod(0o600)
+    return swarm_key_path
 
 
 def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> None:
@@ -138,6 +150,7 @@ def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> Non
 
     srl = out_dir / "ca.srl"
     srl.unlink(missing_ok=True)
+    generate_swarm_key(out_dir)
 
 
 def main() -> None:

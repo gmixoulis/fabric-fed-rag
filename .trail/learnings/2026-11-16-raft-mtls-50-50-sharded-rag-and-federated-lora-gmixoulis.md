@@ -24,3 +24,4 @@ touches:
 
 ## Watch out
 - Debian `/bin/sh` (`dash`) in `python:3.12-slim-bookworm` does not support `wait -n`; use `#!/bin/bash` and `exec` in `scripts/entrypoint.sh`.
+- Kubo 0.43+ (`ipfs/kubo:latest`) refuses to start on a private network (`swarm.key` + `LIBP2P_FORCE_PNET=1`) unless `ipfs config --json AutoConf.Enabled false` is set alongside `ipfs bootstrap rm --all` in `/container-init.d/001-private-swarm.sh`.

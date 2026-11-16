@@ -1,0 +1,105 @@
+{
+  "name": "fabric-fed-rag-network",
+  "version": "2.0.0",
+  "description": "Hyperledger Fabric 2.x-style Connection Profile with mTLS Raft Orderer, Sharded RAG Peers, and Private Kubo IPFS Swarm",
+  "client": {
+    "organization": "MaestroOrg",
+    "connection": {
+      "timeout": {
+        "peer": {
+          "endorser": "30"
+        },
+        "orderer": "30"
+      }
+    }
+  },
+  "channels": {
+    "rag-fed-channel": {
+      "orderers": [
+        "node1-maestro"
+      ],
+      "peers": {
+        "node1-maestro": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "shardId": "shard-1"
+        },
+        "node2-peer": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "shardId": "shard-2"
+        }
+      }
+    }
+  },
+  "organizations": {
+    "MaestroOrg": {
+      "mspid": "MaestroOrgMSP",
+      "peers": [
+        "node1-maestro"
+      ],
+      "certificateAuthorities": [
+        "fabric-fed-ca"
+      ]
+    },
+    "Peer2Org": {
+      "mspid": "Peer2OrgMSP",
+      "peers": [
+        "node2-peer"
+      ],
+      "certificateAuthorities": [
+        "fabric-fed-ca"
+      ]
+    }
+  },
+  "orderers": {
+    "node1-maestro": {
+      "url": "https://localhost:17050",
+      "dockerUrl": "https://node1-maestro:7050",
+      "tlsCACerts": {
+        "path": "./certs/ca.crt"
+      }
+    }
+  },
+  "peers": {
+    "node1-maestro": {
+      "raftUrl": "https://localhost:17050",
+      "ragUrl": "https://localhost:18443",
+      "dockerRaftUrl": "https://node1-maestro:7050",
+      "dockerRagUrl": "https://node1-maestro:8443",
+      "ipfsApiUrl": "http://localhost:15001",
+      "dockerIpfsApiUrl": "http://ipfs-node1:5001",
+      "tlsCACerts": {
+        "path": "./certs/ca.crt"
+      },
+      "clientCert": {
+        "certPath": "./certs/node1-maestro.crt",
+        "keyPath": "./certs/node1-maestro.key"
+      }
+    },
+    "node2-peer": {
+      "raftUrl": "https://localhost:27050",
+      "ragUrl": "https://localhost:28443",
+      "dockerRaftUrl": "https://node2-peer:7050",
+      "dockerRagUrl": "https://node2-peer:8443",
+      "ipfsApiUrl": "http://localhost:25001",
+      "dockerIpfsApiUrl": "http://ipfs-node2:5001",
+      "tlsCACerts": {
+        "path": "./certs/ca.crt"
+      },
+      "clientCert": {
+        "certPath": "./certs/node2-peer.crt",
+        "keyPath": "./certs/node2-peer.key"
+      }
+    }
+  },
+  "ipfsPrivateSwarm": {
+    "forcePrivateNetwork": true,
+    "env": {
+      "LIBP2P_FORCE_PNET": "1"
+    },
+    "swarmKeyPath": "./certs/swarm.key"
+  }
+}

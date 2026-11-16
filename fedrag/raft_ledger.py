@@ -95,6 +95,10 @@ class LedgerState:
                 raise ValueError(
                     f"Backup checksum mismatch for {doc_id}: got {computed}, ledger expects {doc['pdf_sha256']}"
                 )
+            if payload.get("ipfs_cid") and doc.get("ipfs_cid") and payload["ipfs_cid"] != doc["ipfs_cid"]:
+                raise ValueError(
+                    f"Backup IPFS CID mismatch for {doc_id}: got {payload['ipfs_cid']}, ledger expects {doc['ipfs_cid']}"
+                )
             return
 
         if tx_type == "LORA_CLIENT_SUBMIT":

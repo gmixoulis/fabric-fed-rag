@@ -15,9 +15,11 @@ See [`docs/RESEARCH_PLAN.md`](docs/RESEARCH_PLAN.md) for the full research plan,
      - `BACKUP_CHECK`: verifies off-node PDF backup replicas match the on-chain `pdf_sha256`.
      - `LORA_CLIENT_SUBMIT` & `LORA_ROUND_FINALIZE`: commits and verifies each peer's LoRA adapter SHA-256 before and after weighted `FedAvg` / `FFA-LoRA`.
 
-2. **50/50 Document & PDF Sharding (`fedrag/shard_store.py`)**
-   - **Node 1 (`shard-1`)** holds the full PDFs, text chunks, embeddings (`OllamaEmbedder` / `HashEmbedder`), and training pairs for the first 50% of the corpus, plus metadata-only stubs (with verified SHA-256 hashes) and backup replicas for the second 50%.
-   - **Node 2 (`shard-2`)** holds the full PDFs, text chunks, embeddings, and training pairs for the second 50% of the corpus, plus metadata-only stubs and backup replicas for the first 50%.
+2. **50/50 Document & PDF Sharding + Private Kubo IPFS (`fedrag/shard_store.py`, `fedrag/ipfs_client.py`, `connection-profile.json`)**
+   - **Private Kubo Swarm (`LIBP2P_FORCE_PNET=1` + `swarm.key`):** `ipfs-node1` and `ipfs-node2` run with public bootstrap peers removed (`ipfs bootstrap rm --all`), forming an isolated consortium IPFS swarm.
+   - **Node 1 (`shard-1`)** pins the first 50% of full PDFs to `ipfs-node1` (`POST /api/v0/add?pin=true&cid-version=1`), indexes their chunks + embeddings (`OllamaEmbedder` / `HashEmbedder`), and stores metadata-only stubs (`ipfs_cid` + verified SHA-256 hashes) and backup pins for the second 50%.
+   - **Node 2 (`shard-2`)** pins the second 50% of full PDFs to `ipfs-node2`, indexes their chunks + embeddings, and stores metadata-only stubs and backup pins for the first 50%.
+   - **Connection Profile (`connection-profile.json`):** Maps each organization/peer (`MaestroOrg`, `Peer2Org`) to its mTLS Raft Orderer, RAG/Trainer service, X.509 certificates, and local Kubo IPFS RPC endpoint.
 
 3. **Federated LoRA Training (`fedrag/trainer.py`, `fedrag/fedavg.py`, `fedrag/hw_training/`)**
    - Supports both standard `fedavg` LoRA and `ffa` (*FFA-LoRA*, `arXiv:2403.12313`, freezing deterministically seeded `lora_A` and training/averaging `lora_B`).

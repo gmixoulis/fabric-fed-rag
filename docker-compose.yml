@@ -1,8 +1,42 @@
 services:
+  ipfs-node1:
+    image: ipfs/kubo:latest
+    container_name: ipfs-node1
+    hostname: ipfs-node1
+    environment:
+      - LIBP2P_FORCE_PNET=1
+    volumes:
+      - ./certs:/certs:ro
+      - ./scripts/ipfs_init.sh:/container-init.d/001-private-swarm.sh:ro
+      - ipfs1-data:/data/ipfs
+    ports:
+      - "127.0.0.1:15001:5001"
+      - "127.0.0.1:14001:4001"
+    networks:
+      - fabric-mtls-net
+
+  ipfs-node2:
+    image: ipfs/kubo:latest
+    container_name: ipfs-node2
+    hostname: ipfs-node2
+    environment:
+      - LIBP2P_FORCE_PNET=1
+    volumes:
+      - ./certs:/certs:ro
+      - ./scripts/ipfs_init.sh:/container-init.d/001-private-swarm.sh:ro
+      - ipfs2-data:/data/ipfs
+    ports:
+      - "127.0.0.1:25001:5001"
+      - "127.0.0.1:24001:4001"
+    networks:
+      - fabric-mtls-net
+
   node1-maestro:
     build: .
     container_name: node1-maestro
     hostname: node1-maestro
+    depends_on:
+      - ipfs-node1
     environment:
       - NODE_ID=node1-maestro
       - SHARD_ID=shard-1
@@ -10,6 +44,7 @@ services:
       - LEADER_URL=https://node1-maestro:7050
       - RAFT_PEERS=https://node2-peer:7050
       - PEER_RAG_URL=https://node2-peer:8443
+      - FEDRAG_IPFS_API_URL=http://ipfs-node1:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
       - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
     volumes:
@@ -25,6 +60,8 @@ services:
     build: .
     container_name: node2-peer
     hostname: node2-peer
+    depends_on:
+      - ipfs-node2
     environment:
       - NODE_ID=node2-peer
       - SHARD_ID=shard-2
@@ -32,6 +69,7 @@ services:
       - LEADER_URL=https://node1-maestro:7050
       - RAFT_PEERS=
       - PEER_RAG_URL=https://node1-maestro:8443
+      - FEDRAG_IPFS_API_URL=http://ipfs-node2:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
       - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
     volumes:
@@ -46,6 +84,8 @@ services:
 volumes:
   node1-data:
   node2-data:
+  ipfs1-data:
+  ipfs2-data:
 
 networks:
   fabric-mtls-net:

@@ -14,6 +14,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from fedrag.ipfs_client import KuboIPFSClient  # noqa: E402
 from fedrag.node_service import make_client_ssl_context, mtls_request  # noqa: E402
 
 
@@ -171,6 +172,29 @@ def wait_for_nodes(ssl_ctx, urls: list[str], timeout_s: float = 30.0) -> None:
                 time.sleep(0.5)
 
 
+def connect_kubo_private_swarm(ipfs1_url: str, ipfs2_url: str, timeout_s: float = 30.0) -> None:
+    c1 = KuboIPFSClient(ipfs1_url, timeout=5.0)
+    c2 = KuboIPFSClient(ipfs2_url, timeout=5.0)
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            id1 = c1.id_info()
+            id2 = c2.id_info()
+            peer2_id = id2["ID"]
+            c1.swarm_connect(f"/dns4/ipfs-node2/tcp/4001/p2p/{peer2_id}")
+            peers = c1.swarm_peers()
+            print(
+                f"   - Kubo Private Swarm (LIBP2P_FORCE_PNET=1): "
+                f"ipfs-node1 ({id1['ID'][:12]}...) <-> ipfs-node2 ({peer2_id[:12]}...), peers={len(peers)}"
+            )
+            return
+        except Exception as exc:
+            if time.time() >= deadline:
+                print(f"   - Kubo Private Swarm note: {exc}")
+                return
+            time.sleep(0.5)
+
+
 def action_health(ssl_ctx, args) -> None:
     wait_for_nodes(
         ssl_ctx,
@@ -185,10 +209,11 @@ def action_health(ssl_ctx, args) -> None:
     h2 = mtls_request(ssl_ctx, f"{args.node2_raft}/health")
     print(f"   - node1-maestro Raft role={h1['role']}, client_cn={h1['verified_client_cn']}")
     print(f"   - node2-peer    Raft role={h2['role']}, client_cn={h2['verified_client_cn']}")
+    connect_kubo_private_swarm(args.node1_ipfs, args.node2_ipfs)
 
 
 def action_ingest(ssl_ctx, args) -> None:
-    print("Ingesting 50/50 Sharded PDFs + Embeddings + Cross-Node Backups over mTLS...")
+    print("Ingesting 50/50 Sharded PDFs + Kubo IPFS CIDs + Embeddings + Cross-Node Backups over mTLS...")
     for doc in CORPUS_SHARD_1:
         pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
         res = mtls_request(
@@ -202,9 +227,9 @@ def action_ingest(ssl_ctx, args) -> None:
             },
         )
         print(
-            f"   [Shard 1 -> node1-maestro] {doc['doc_id']} full PDF+vectors stored; "
-            f"metadata stub + backup verified on node2-peer (Raft block #{res['raft_block_index']}, "
-            f"sha256={res['manifest']['pdf_sha256'][:12]}...)"
+            f"   [Shard 1 -> node1-maestro] {doc['doc_id']} pinned CID={res['manifest']['ipfs_cid'][:18]}...; "
+            f"stub + backup verified on node2-peer (Raft block #{res['raft_block_index']}, "
+            f"sha256={res['manifest']['pdf_sha256'][:10]}...)"
         )
 
     for doc in CORPUS_SHARD_2:
@@ -220,9 +245,9 @@ def action_ingest(ssl_ctx, args) -> None:
             },
         )
         print(
-            f"   [Shard 2 -> node2-peer]    {doc['doc_id']} full PDF+vectors stored; "
-            f"metadata stub + backup verified on node1-maestro (Raft block #{res['raft_block_index']}, "
-            f"sha256={res['manifest']['pdf_sha256'][:12]}...)"
+            f"   [Shard 2 -> node2-peer]    {doc['doc_id']} pinned CID={res['manifest']['ipfs_cid'][:18]}...; "
+            f"stub + backup verified on node1-maestro (Raft block #{res['raft_block_index']}, "
+            f"sha256={res['manifest']['pdf_sha256'][:10]}...)"
         )
 
 
@@ -241,10 +266,10 @@ def action_train(ssl_ctx, args) -> None:
         c1, c2 = round_res["clients"][0], round_res["clients"][1]
         print(
             f"   [Round {r} | {args.lora_mode}] "
-            f"{c1['node_id']} loss {c1['first_loss']:.4f} -> {c1['last_loss']:.4f} ({c1['num_examples']} ex) | "
-            f"{c2['node_id']} loss {c2['first_loss']:.4f} -> {c2['last_loss']:.4f} ({c2['num_examples']} ex) | "
-            f"FedAvg weighted_loss={round_res['weighted_loss']:.4f} | "
-            f"global_sha256={round_res['global_adapter_sha256'][:12]}... (Raft block #{round_res['raft_block_index']})"
+            f"{c1['node_id']} loss {c1['first_loss']:.4f}->{c1['last_loss']:.4f} | "
+            f"{c2['node_id']} loss {c2['first_loss']:.4f}->{c2['last_loss']:.4f} | "
+            f"FedAvg loss={round_res['weighted_loss']:.4f} | "
+            f"global_cid={round_res['global_adapter_cid'][:16]}... (Raft block #{round_res['raft_block_index']})"
         )
 
 
@@ -306,18 +331,22 @@ def action_status(ssl_ctx, args) -> None:
     h2_end = s2["raft"]["ledger"]["height"]
     hash1 = s1["raft"]["ledger"]["last_hash"]
     hash2 = s2["raft"]["ledger"]["last_hash"]
+    ipfs1 = s1.get("ipfs", {})
+    ipfs2 = s2.get("ipfs", {})
 
     print("Cluster Consistency & Storage Check:")
     print(
         f"   - node1-maestro: full_docs={len(s1['rag_store']['full_shard_documents'])}, "
         f"metadata_stubs={len(s1['rag_store']['metadata_only_stubs'])}, "
         f"verified_backups={len(s1['rag_store']['verified_backups'])}, "
+        f"ipfs={ipfs1.get('mode')} (pins={len(ipfs1.get('pins', []))}), "
         f"raft_height={h1_end}, tip_hash={hash1[:16]}..."
     )
     print(
         f"   - node2-peer:    full_docs={len(s2['rag_store']['full_shard_documents'])}, "
         f"metadata_stubs={len(s2['rag_store']['metadata_only_stubs'])}, "
         f"verified_backups={len(s2['rag_store']['verified_backups'])}, "
+        f"ipfs={ipfs2.get('mode')} (pins={len(ipfs2.get('pins', []))}), "
         f"raft_height={h2_end}, tip_hash={hash2[:16]}..."
     )
     assert h1_end == h2_end and hash1 == hash2, "Raft ledger state diverged between nodes!"
@@ -339,6 +368,9 @@ def main() -> None:
     parser.add_argument("--node2-rag", default="https://localhost:28443")
     parser.add_argument("--node1-raft", default="https://localhost:17050")
     parser.add_argument("--node2-raft", default="https://localhost:27050")
+    parser.add_argument("--node1-ipfs", default="http://localhost:15001")
+    parser.add_argument("--node2-ipfs", default="http://localhost:25001")
+    parser.add_argument("--connection-profile", default="./connection-profile.json")
     parser.add_argument("--certs-dir", default="./certs")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--lora-mode", default="fedavg", choices=("fedavg", "ffa"))
