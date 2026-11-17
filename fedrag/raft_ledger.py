@@ -38,6 +38,10 @@ def compute_entry_hash(entry: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _is_sha256_hex(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
 class LedgerState:
     """Hash-chained block log and state machine for sharded RAG & Federated LoRA."""
 
@@ -52,11 +56,7 @@ class LedgerState:
 
         if self.storage_path and self.storage_path.is_file():
             data = json.loads(self.storage_path.read_text())
-            self.entries = data["entries"]
-            self.documents = data["documents"]
-            self.backups = data["backups"]
-            self.client_submissions = data["client_submissions"]
-            self.final_rounds = data["final_rounds"]
+            self._load_entries(data["entries"])
             return
 
         genesis = {
@@ -79,10 +79,13 @@ class LedgerState:
             doc_id = payload.get("doc_id", "")
             pdf_sha = payload.get("pdf_sha256", "")
             chunks_sha = payload.get("chunks_sha256", "")
-            if not doc_id or len(pdf_sha) != 64 or len(chunks_sha) != 64:
+            if not doc_id or not _is_sha256_hex(pdf_sha) or not _is_sha256_hex(chunks_sha):
                 raise ValueError("DOC_MANIFEST requires doc_id and 64-char sha256 hashes")
             if not payload.get("shard_owner") or not payload.get("metadata_holder"):
                 raise ValueError("DOC_MANIFEST requires shard_owner and metadata_holder")
+            existing = self.documents.get(doc_id)
+            if existing is not None and existing != payload:
+                raise ValueError(f"DOC_MANIFEST already recorded for {doc_id!r} with a different payload")
             return
 
         if tx_type == "BACKUP_CHECK":
@@ -106,7 +109,7 @@ class LedgerState:
             node_id = payload.get("node_id", "")
             sha = payload.get("adapter_sha256", "")
             num_ex = int(payload.get("num_examples", 0))
-            if round_id <= 0 or not node_id or len(sha) != 64 or num_ex <= 0:
+            if round_id <= 0 or not node_id or not _is_sha256_hex(sha) or num_ex <= 0:
                 raise ValueError("Invalid LORA_CLIENT_SUBMIT fields")
             return
 
@@ -114,8 +117,11 @@ class LedgerState:
             round_id = int(payload.get("round_id", 0))
             global_sha = payload.get("global_adapter_sha256", "")
             part_hashes = payload.get("participant_hashes") or {}
-            if round_id <= 0 or len(global_sha) != 64 or not part_hashes:
+            if round_id <= 0 or not _is_sha256_hex(global_sha) or not part_hashes:
                 raise ValueError("LORA_ROUND_FINALIZE requires round_id, global_adapter_sha256, participant_hashes")
+            for node_id, expected_hash in part_hashes.items():
+                if not _is_sha256_hex(expected_hash):
+                    raise ValueError(f"Invalid participant hash for {node_id} in round {round_id}")
             subs = self.client_submissions.get(str(round_id), {})
             for node_id, expected_hash in part_hashes.items():
                 recorded = subs.get(node_id)
@@ -142,6 +148,32 @@ class LedgerState:
             entry["entry_hash"] = compute_entry_hash(entry)
             return entry
 
+    def _apply_payload_state(self, tx_type: str, payload: dict) -> None:
+        if tx_type == "DOC_MANIFEST":
+            self.documents[payload["doc_id"]] = payload
+        elif tx_type == "BACKUP_CHECK":
+            att = {**payload, "verified": True}
+            self.backups.setdefault(payload["doc_id"], []).append(att)
+        elif tx_type == "LORA_CLIENT_SUBMIT":
+            r_key = str(payload["round_id"])
+            self.client_submissions.setdefault(r_key, {})[payload["node_id"]] = payload
+        elif tx_type == "LORA_ROUND_FINALIZE":
+            r_key = str(payload["round_id"])
+            self.final_rounds[r_key] = payload
+
+    def _load_entries(self, entries: list[dict]) -> None:
+        if not entries:
+            raise ValueError("Ledger has no entries")
+        for i, entry in enumerate(entries):
+            if compute_entry_hash(entry) != entry.get("entry_hash"):
+                raise ValueError(f"Entry hash verification failed at index {i}")
+            expected_prev = GENESIS_ZEROS if i == 0 else entries[i - 1]["entry_hash"]
+            if entry.get("prev_hash") != expected_prev:
+                raise ValueError(f"Broken hash chain at index {i}")
+        for entry in entries:
+            self._apply_payload_state(entry["tx_type"], entry["payload"])
+            self.entries.append(entry)
+
     def apply_entry(self, entry: dict) -> None:
         with self._lock:
             idx = int(entry["index"])
@@ -161,18 +193,7 @@ class LedgerState:
             tx_type = entry["tx_type"]
             payload = entry["payload"]
             self.validate(tx_type, payload)
-
-            if tx_type == "DOC_MANIFEST":
-                self.documents[payload["doc_id"]] = payload
-            elif tx_type == "BACKUP_CHECK":
-                att = {**payload, "verified": True}
-                self.backups.setdefault(payload["doc_id"], []).append(att)
-            elif tx_type == "LORA_CLIENT_SUBMIT":
-                r_key = str(payload["round_id"])
-                self.client_submissions.setdefault(r_key, {})[payload["node_id"]] = payload
-            elif tx_type == "LORA_ROUND_FINALIZE":
-                r_key = str(payload["round_id"])
-                self.final_rounds[r_key] = payload
+            self._apply_payload_state(tx_type, payload)
 
             self.entries.append(entry)
             self._persist()

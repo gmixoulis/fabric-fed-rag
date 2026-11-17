@@ -40,7 +40,7 @@ export interface LoRAClientSubmission {
   round_id: number;
   node_id: string;
   shard_id: string;
-  lora_mode?: "fedavg" | "ffa";
+  lora_mode?: "fedavg" | "ffa" | "dora";
   adapter_cid?: string;
   adapter_sha256: string;
   num_examples: number;
@@ -50,7 +50,7 @@ export interface LoRAClientSubmission {
 
 export interface LoRARoundFinalized {
   round_id: number;
-  lora_mode?: "fedavg" | "ffa";
+  lora_mode?: "fedavg" | "ffa" | "dora";
   global_adapter_cid?: string;
   global_adapter_sha256: string;
   participant_hashes: Record<string, string>;
@@ -74,6 +74,23 @@ export function validateTransaction(
     if (!doc.shard_owner || !doc.metadata_holder) {
       throw new Error("DOC_MANIFEST requires shard_owner and metadata_holder");
     }
+    const recorded = documents[doc.doc_id];
+    if (recorded) {
+      const fields: (keyof DocManifest)[] = [
+        "doc_id",
+        "title",
+        "shard_owner",
+        "metadata_holder",
+        "ipfs_cid",
+        "pdf_sha256",
+        "chunks_sha256",
+        "num_chunks",
+        "page_count",
+      ];
+      if (fields.some((field) => doc[field] !== recorded[field])) {
+        throw new Error(`DOC_MANIFEST for ${doc.doc_id} conflicts with the recorded manifest`);
+      }
+    }
     return;
   }
 
@@ -86,6 +103,11 @@ export function validateTransaction(
     if (backup.computed_sha256 !== expectedDoc.pdf_sha256) {
       throw new Error(
         `Backup checksum mismatch for ${backup.doc_id}: ${backup.computed_sha256} !== ${expectedDoc.pdf_sha256}`,
+      );
+    }
+    if (backup.ipfs_cid && expectedDoc.ipfs_cid && backup.ipfs_cid !== expectedDoc.ipfs_cid) {
+      throw new Error(
+        `Backup IPFS CID mismatch for ${backup.doc_id}: ${backup.ipfs_cid} !== ${expectedDoc.ipfs_cid}`,
       );
     }
     return;
@@ -104,8 +126,15 @@ export function validateTransaction(
     if (fin.round_id <= 0 || !isSha256(fin.global_adapter_sha256)) {
       throw new Error("Invalid LORA_ROUND_FINALIZE fields");
     }
+    const participants = Object.entries(fin.participant_hashes ?? {});
+    if (participants.length === 0) {
+      throw new Error(`LORA_ROUND_FINALIZE for round ${fin.round_id} requires participant_hashes`);
+    }
     const roundSubs = clientSubs[fin.round_id] ?? {};
-    for (const [nodeId, expectedHash] of Object.entries(fin.participant_hashes)) {
+    for (const [nodeId, expectedHash] of participants) {
+      if (!isSha256(expectedHash)) {
+        throw new Error(`Invalid participant hash for ${nodeId} in round ${fin.round_id}`);
+      }
       const committed = roundSubs[nodeId];
       if (!committed) {
         throw new Error(`Missing LORA_CLIENT_SUBMIT for ${nodeId} in round ${fin.round_id}`);

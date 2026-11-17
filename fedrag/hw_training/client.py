@@ -22,7 +22,7 @@ from pathlib import Path
 os.umask(0o077)
 
 _HERE = Path(__file__).resolve().parent
-for _path in (_HERE, _HERE.parent):
+for _path in (_HERE,):  # not the parent: fedrag/fedavg.py would shadow this fedavg
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -245,6 +245,7 @@ def lora_state(model) -> dict:
     from peft import get_peft_model_state_dict
 
     state = get_peft_model_state_dict(model)
+    # DoRA magnitude vectors contain ".lora_" too, so they are saved and averaged.
     return {name: tensor for name, tensor in state.items() if ".lora_" in name}
 
 
@@ -270,7 +271,8 @@ def initialise_lora_from_seed(model, seed: int) -> None:
 
     PEFT draws A from the global RNG, which differs per device and dtype; both
     machines then start from unrelated bases and the first FedAvg average would
-    blend noise.  B stays zero, exactly like PEFT's own initialisation.
+    blend noise.  B stays zero, exactly like PEFT's own initialisation. DoRA
+    magnitude vectors are skipped, so PEFT's base-weight norm stays untouched.
     """
     import torch
 
@@ -327,7 +329,7 @@ def supervised_loss(model, batch: dict, device: str, torch_module):
     torch = torch_module
     input_ids = torch.tensor([batch["ids"]], dtype=torch.long, device=device)
     size = int(batch["target_size"])
-    base = model.get_base_model()
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
 
     def compute():
         # The full vocabulary head cannot be cast at once on a 6 GiB GPU.
@@ -350,7 +352,9 @@ def train_local(model, tokenizer, examples: list[dict], config: dict, device: st
     accumulation = max(1, min(int(config["grad_accumulation"]), steps))
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(parameters, lr=float(config["lr"]))
-    scaler = torch.amp.GradScaler("cuda") if device == "cuda" else None
+    # The default init_scale (65536) overflows fp16 in the backward pass on this model: every
+    # gradient is NaN, GradScaler skips each step without a word, and B stays exactly zero.
+    scaler = torch.amp.GradScaler("cuda", init_scale=1.0) if device == "cuda" else None
     generator = random.Random(int(config["seed"]) + int(seed_offset))
     order: list[int] = []
     while len(order) < steps:
@@ -373,6 +377,8 @@ def train_local(model, tokenizer, examples: list[dict], config: dict, device: st
         if finished:
             if scaler is not None:
                 scaler.unscale_(optimizer)
+            if not all(torch.isfinite(p.grad).all() for p in parameters if p.grad is not None):
+                raise RuntimeError("Non-finite gradients: the optimizer step would be skipped")
             torch.nn.utils.clip_grad_norm_(parameters, 1.0)
             if scaler is not None:
                 scaler.step(optimizer)

@@ -35,7 +35,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
-for _path in (_HERE, _HERE.parent):
+for _path in (_HERE,):  # not the parent: fedrag/fedavg.py would shadow this fedavg
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 

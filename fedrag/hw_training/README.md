@@ -151,6 +151,10 @@ agree:
 | `round_timeout_s` | both the watchdog timeout and the coordinator's wait |
 | `base_pc`, `base_mac` | the two base checkpoints |
 
+### Optional DoRA
+
+Add `"use_dora": true` to the `lora` section of `config.json` to train with PEFT's weight-decomposed LoRA (`LoraConfig(use_dora=True)`); the key is optional, must be a bool, and defaults to `false`. Both clients use the same value and the coordinator rejects an adapter whose `use_dora` differs, so DoRA magnitude vectors are saved, checked and averaged with the other LoRA tensors. Do not assume a PEFT DoRA adapter converts with llama.cpp's `convert_lora_to_gguf`: merge it into the base model before GGUF export unless that conversion has been verified for your PEFT/llama.cpp versions.
+
 ### Held-out evaluation
 
 An adapter is only useful if it answers questions it was not trained on. The

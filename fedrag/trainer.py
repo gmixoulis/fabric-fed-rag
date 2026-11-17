@@ -1,10 +1,14 @@
-"""Local LoRA Adapter Trainer on a Peer's 50% Document Shard (FedAvg-LoRA & FFA-LoRA).
+"""Local LoRA Adapter Trainer on a Peer's 50% Document Shard (FedAvg-LoRA, FFA-LoRA, DoRA).
 
-Supports two federated low-rank adaptation modes:
+Supports three federated low-rank adaptation modes:
 1. ``fedavg``: Standard Federated LoRA (trains and averages both ``lora_A`` and ``lora_B``).
 2. ``ffa``: Federated Freeze-A LoRA (``arXiv:2403.12313``), which keeps the deterministically
    seeded ``lora_A`` projection frozen across all clients and rounds, training and averaging
    only ``lora_B`` to eliminate cross-term aggregation noise (``B_bar @ A_bar != mean(B_i @ A_i)``).
+3. ``dora``: Weight-Decomposed LoRA (``arXiv:2402.09353``). Each module contributes
+   ``(m / ||V||_row) * (V @ h) - W0 @ h`` with ``V = W0 + scale * B @ A`` and frozen ``W0 = I``;
+   ``A``, ``B`` and the magnitude ``m`` (PEFT key ``lora_magnitude_vector``) are trained and
+   averaged. As in the paper and PEFT, ``||V||_row`` is treated as a constant in the backward pass.
 """
 
 from __future__ import annotations
@@ -26,8 +30,9 @@ DEFAULT_LORA_CONFIG = {
     "local_steps": 8,
     "lr": 0.05,
     "seed": 42,
-    "lora_mode": "fedavg",  # "fedavg" or "ffa" (Freeze-A LoRA, arXiv:2403.12313)
+    "lora_mode": "fedavg",  # "fedavg", "ffa" (arXiv:2403.12313) or "dora" (arXiv:2402.09353)
 }
+MAGNITUDE_SUFFIX = ".lora_magnitude_vector"
 
 
 def _tensor_seed(base_seed: int, name: str) -> int:
@@ -54,6 +59,9 @@ def init_lora_state(config: dict | None = None) -> dict[str, np.ndarray]:
                 np.float32
             )
             state[b_key] = np.zeros((d_model, rank), dtype=np.float32)
+            if str(cfg["lora_mode"]).lower() == "dora":
+                # Row L2 norms of W0 = I.
+                state[prefix + MAGNITUDE_SUFFIX] = np.ones(d_model, dtype=np.float32)
     return state
 
 
@@ -66,6 +74,60 @@ def _project_text(embedder: HashEmbedder, text: str, d_model: int, seed: int) ->
     vec = raw @ proj
     norm = np.linalg.norm(vec)
     return vec / norm if norm > 0 else vec
+
+
+def encode_example(
+    embedder: HashEmbedder, example: dict[str, str], d_model: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Encode one ``{"prompt", "target"}`` example into the (x, y) vectors the trainer uses."""
+    return (
+        _project_text(embedder, example["prompt"], d_model, 101),
+        _project_text(embedder, example["target"], d_model, 202),
+    )
+
+
+def _dora_terms(
+    state: dict[str, np.ndarray], prefix: str, scale: float, h: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``V @ h`` and the row norms ``||V||_row`` for ``V = I + scale * B @ A``."""
+    v = np.eye(h.shape[0], dtype=np.float32) + scale * (
+        state[f"{prefix}.lora_B.weight"] @ state[f"{prefix}.lora_A.weight"]
+    )
+    return v @ h, np.linalg.norm(v, axis=1)
+
+
+def _forward(
+    state: dict[str, np.ndarray], x_vec: np.ndarray, cfg: dict, dora: bool
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Return the final hidden state and each layer's input."""
+    scale = float(cfg["alpha"]) / float(cfg["r"])
+    h = x_vec.copy()
+    layer_inputs: list[np.ndarray] = []
+    for layer in range(int(cfg["layers"])):
+        layer_inputs.append(h.copy())
+        delta = np.zeros_like(h)
+        for module in cfg["target_modules"]:
+            prefix = f"base_model.model.model.layers.{layer}.self_attn.{module}"
+            if dora:
+                vh, norm = _dora_terms(state, prefix, scale, h)
+                delta += state[prefix + MAGNITUDE_SUFFIX] / norm * vh - h
+            else:
+                a_mat = state[f"{prefix}.lora_A.weight"]
+                b_mat = state[f"{prefix}.lora_B.weight"]
+                delta += scale * (b_mat @ (a_mat @ h))
+        h = h + delta
+    return h, layer_inputs
+
+
+def apply_adapter(
+    state: dict[str, np.ndarray], x_vec: np.ndarray, config: dict | None = None
+) -> np.ndarray:
+    """Run the toy residual model with ``state`` on ``x_vec``; DoRA is detected by mode or keys."""
+    cfg = {**DEFAULT_LORA_CONFIG, **(config or {})}
+    dora = str(cfg["lora_mode"]).lower() == "dora" or any(
+        k.endswith(MAGNITUDE_SUFFIX) for k in state
+    )
+    return _forward(state, x_vec, cfg, dora)[0]
 
 
 def train_local_lora_round(
@@ -90,7 +152,8 @@ def train_local_lora_round(
     local_steps = int(cfg["local_steps"])
     layers = int(cfg["layers"])
     lora_mode = str(cfg.get("lora_mode", "fedavg")).lower()
-    if lora_mode not in ("fedavg", "ffa"):
+    dora = lora_mode == "dora"
+    if lora_mode not in ("fedavg", "ffa", "dora"):
         raise ValueError(f"Unsupported lora_mode: {lora_mode!r}")
 
     if global_adapter_dir is not None and Path(global_adapter_dir).exists():
@@ -100,13 +163,7 @@ def train_local_lora_round(
         state = init_lora_state(cfg)
 
     embedder = HashEmbedder()
-    encoded = [
-        (
-            _project_text(embedder, ex["prompt"], d_model, 101),
-            _project_text(embedder, ex["target"], d_model, 202),
-        )
-        for ex in examples
-    ]
+    encoded = [encode_example(embedder, ex, d_model) for ex in examples]
 
     step_losses: list[float] = []
     for _step in range(local_steps):
@@ -114,18 +171,7 @@ def train_local_lora_round(
         grads = {k: np.zeros_like(v) for k, v in state.items()}
 
         for x_vec, y_vec in encoded:
-            h = x_vec.copy()
-            layer_inputs: list[np.ndarray] = []
-            for layer in range(layers):
-                layer_inputs.append(h.copy())
-                delta = np.zeros_like(h)
-                for module in cfg["target_modules"]:
-                    prefix = f"base_model.model.model.layers.{layer}.self_attn.{module}"
-                    a_mat = state[f"{prefix}.lora_A.weight"]
-                    b_mat = state[f"{prefix}.lora_B.weight"]
-                    delta += scale * (b_mat @ (a_mat @ h))
-                h = h + delta
-
+            h, layer_inputs = _forward(state, x_vec, cfg, dora)
             diff = h - y_vec
             loss = 0.5 * float(np.sum(diff * diff))
             total_loss += loss
@@ -139,11 +185,18 @@ def train_local_lora_round(
                     a_mat = state[a_key]
                     b_mat = state[b_key]
 
+                    g = diff
+                    if dora:
+                        # ||V||_row is detached (DoRA paper / PEFT): no gradient through the norm.
+                        m_key = prefix + MAGNITUDE_SUFFIX
+                        vh, norm = _dora_terms(state, prefix, scale, h_in)
+                        grads[m_key] += diff * vh / norm / len(encoded)
+                        g = diff * state[m_key] / norm
                     ah = a_mat @ h_in
-                    grad_b = scale * np.outer(diff, ah)
+                    grad_b = scale * np.outer(g, ah)
                     grads[b_key] += grad_b / len(encoded)
-                    if lora_mode == "fedavg":
-                        grad_a = scale * np.outer(b_mat.T @ diff, h_in)
+                    if lora_mode in ("fedavg", "dora"):
+                        grad_a = scale * np.outer(b_mat.T @ g, h_in)
                         grads[a_key] += grad_a / len(encoded)
 
         for k in state:

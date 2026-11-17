@@ -29,7 +29,7 @@ os.umask(0o077)
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
-for _path in (_HERE, _HERE.parent):
+for _path in (_HERE,):  # not the parent: fedrag/fedavg.py would shadow this fedavg
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -45,6 +45,7 @@ DEFAULT_MAC_ROOT = "~/opt/fedtrain"
 DEFAULT_MAC_PYTHON = "~/opt/fedtrain/.venv/bin/python"
 DEFAULT_DATA = _ROOT / "eval/softone_train_seed.jsonl"
 DEFAULT_HOLDOUT = _ROOT / "eval/softone_holdout.jsonl"
+DEFAULT_FACTS = _ROOT / "eval/taught_facts.jsonl"
 
 CLIENT_FILES = (
     "client.py",
@@ -141,19 +142,21 @@ def build_evaluate_command(
     train_safe: str,
     python: str,
     script: str,
-    adapter: str,
+    adapters: list[str],
     out: str,
     holdout: str,
     train_data: str,
 ) -> list[str]:
-    """Post-run evaluation: the same train-safe wrapper as a PC round, no ssh."""
-    return [
-        train_safe, "--", python, script,
-        "--adapter", adapter,
-        "--out", out,
-        "--holdout", holdout,
-        "--train-data", train_data,
-    ]
+    """Post-run evaluation: the same train-safe wrapper as a PC round, no ssh.
+
+    Every adapter is passed with ``--adapter`` in the order given, so the base
+    model and then each round's global adapter are scored in one run.
+    """
+    command = [train_safe, "--", python, script]
+    for adapter in adapters:
+        command += ["--adapter", adapter]
+    command += ["--out", out, "--holdout", holdout, "--train-data", train_data]
+    return command
 
 
 def evaluate_summary(report: dict) -> dict:
@@ -311,7 +314,8 @@ def prepare_experiment(
     """Render (prompt, target) texts once, then split them into the two shards."""
     exp_dir.mkdir(parents=True, mode=0o700)
     exp_dir.chmod(0o700)
-    texts = common.prepare_texts(_ROOT, read_seed_examples(data))
+    texts = common.prepare_texts(_ROOT, read_seed_examples(data),
+                                 facts=common.load_taught_facts(DEFAULT_FACTS))
     if dry_run:
         texts = texts[:DRY_RUN_EXAMPLES]
     shards = split_shard(texts, weights, seed)
@@ -534,9 +538,13 @@ def main(argv: list[str] | None = None) -> int:
     summary = {"experiment": str(exp_dir), "rounds": summaries, "final_adapter": str(final)}
     if args.evaluate:
         eval_out = exp_dir / "eval.json"
+        # final-adapter is a copy of the last round's global, so that round is not listed twice.
+        adapters = [str(exp_dir / f"round-{index}" / "global")
+                    for index in range(1, rounds)]
+        adapters.append(str(final))
         command = build_evaluate_command(
             train_safe=args.train_safe, python=args.pc_python,
-            script=str(_HERE / "evaluate_adapter.py"), adapter=str(final),
+            script=str(_HERE / "evaluate_adapter.py"), adapters=adapters,
             out=str(eval_out), holdout=str(args.holdout), train_data=str(args.data),
         )
         print(json.dumps({"phase": "evaluate", "train_safe": command[0],

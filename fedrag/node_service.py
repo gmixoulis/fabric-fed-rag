@@ -3,7 +3,7 @@
 Runs on each Docker peer (`node1-maestro` and `node2-peer`), enforcing TLS 1.3
 mutual authentication (`ssl.CERT_REQUIRED`) for all peer-to-peer and Maestro-to-peer calls,
 and committing all document hashes, backup verifications, and LoRA round hashes to the
-Go Raft ledger (`cmd/raftnode`).
+Python Raft ledger (`fedrag/raft_ledger.py`).
 """
 
 from __future__ import annotations
@@ -337,6 +337,7 @@ class NodeApp:
         k = int(body.get("k", 3))
         local_hits = self.store.search_local(query, k=k)
         peer_hits = []
+        peer_node_id = None
         if self.peer_url:
             res = mtls_request(
                 self.ssl_client_ctx,
@@ -345,6 +346,7 @@ class NodeApp:
                 payload={"query": query, "k": k},
             )
             peer_hits = res.get("results", [])
+            peer_node_id = res.get("node_id")
 
         ledger_docs = self.get_raft_ledger().get("ledger", {}).get("documents", {})
         verified_hits = []
@@ -361,7 +363,7 @@ class NodeApp:
         return {
             "query": query,
             "top_k": verified_hits[:k],
-            "searched_nodes": [self.node_id] + ([ "node2-peer" ] if self.peer_url else []),
+            "searched_nodes": [self.node_id] + ([peer_node_id] if peer_node_id else []),
         }
 
 

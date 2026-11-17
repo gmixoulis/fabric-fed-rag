@@ -141,14 +141,15 @@ def build_adapter_config(config: dict, base_model_name_or_path: str | None) -> d
         "revision": None,
         "target_modules": args["target_modules"],
         "task_type": args["task_type"],
-        "use_dora": False,
+        "use_dora": args["use_dora"],
         "use_rslora": False,
     }
 
 
 def assert_same_lora_config(reference: dict, candidate: dict, label: str) -> None:
     """Round configurations must match exactly or the average is meaningless."""
-    for key in ("r", "lora_alpha", "lora_dropout", "target_modules", "task_type", "bias"):
+    for key in ("r", "lora_alpha", "lora_dropout", "target_modules", "task_type", "bias",
+                "use_dora"):
         if reference.get(key) != candidate.get(key):
             raise ValueError(
                 f"{label} LoRA config differs on {key}: "
@@ -218,7 +219,6 @@ if __name__ == "__main__":
     # The coordinator runs in the app env (no torch); it calls this with the train venv.
     import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # softone_training
     _, pc, mac, out, config_path, base, round_index = sys.argv
     average_round(Path(pc), Path(mac), Path(out), json.loads(Path(config_path).read_text()),
                   base, int(round_index))

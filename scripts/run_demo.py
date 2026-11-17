@@ -378,7 +378,7 @@ def main() -> None:
     parser.add_argument("--connection-profile", default="./connection-profile.json")
     parser.add_argument("--certs-dir", default="./certs")
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--lora-mode", default="fedavg", choices=("fedavg", "ffa"))
+    parser.add_argument("--lora-mode", default="fedavg", choices=("fedavg", "ffa", "dora"))
     parser.add_argument("--query", default="")
     args = parser.parse_args()
 

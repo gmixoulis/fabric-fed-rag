@@ -7,7 +7,7 @@
 #   ./run.sh up                       # Start the 2 connected mTLS Docker containers
 #   ./run.sh down                     # Stop and remove containers + volumes
 #   ./run.sh ingest                   # Ingest 50/50 sharded PDFs, SHA-256 stubs, and cross-node backups
-#   ./run.sh train [rounds] [mode]    # Run Federated LoRA rounds (e.g. ./run.sh train 3 fedavg OR ./run.sh train 3 ffa)
+#   ./run.sh train [rounds] [mode]    # Run Federated LoRA rounds (e.g. ./run.sh train 3 fedavg, ./run.sh train 3 ffa, ./run.sh train 3 dora)
 #   ./run.sh query "<question>"       # Run decentralized scatter-gather RAG query across both shards
 #   ./run.sh tamper                   # Test Raft chaincode rejection of a tampered backup hash
 #   ./run.sh status                   # Show 50/50 shard counts, backup counts, and Raft block height
@@ -112,7 +112,7 @@ case "$CMD" in
 
   *)
     echo "Unknown command: $CMD"
-    echo "Available commands: all | certs | build | up | down | ingest | train [rounds] [fedavg|ffa] | query [question] | tamper | status | ledger | logs | unit"
+    echo "Available commands: all | certs | build | up | down | ingest | train [rounds] [fedavg|ffa|dora] | query [question] | tamper | status | ledger | logs | unit"
     exit 1
     ;;
 esac

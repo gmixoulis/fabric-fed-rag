@@ -1,7 +1,7 @@
 """LoRA key layout, exact shape validation, weighted FedAvg, and SHA-256 verification.
 
 Ported from softone-rag/training/fed/fedavg.py and extended with deterministic
-cryptographic hashing so the Go Raft ledger can verify every local and global adapter.
+cryptographic hashing so the Python Raft ledger can verify every local and global adapter.
 """
 
 from __future__ import annotations
