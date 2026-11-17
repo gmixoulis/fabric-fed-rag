@@ -143,6 +143,15 @@ def heldout_loss(model, tokenizer, cases: list[dict], device: str, max_length: i
     return mean_loss(heldout_case_losses(model, tokenizer, cases, device, max_length, facts))
 
 
+def reuse_base(path: Path | str, cases: list[dict]) -> tuple[dict, list[dict]]:
+    """The base summary and records of an earlier report, checked against ``cases``."""
+    report = json.loads(Path(path).read_text(encoding="utf-8"))
+    before = report["before"]
+    if [record["id"] for record in before] != [case["id"] for case in cases]:
+        raise RuntimeError(f"{path} was scored on different holdout cases")
+    return report["base"], before
+
+
 def evaluate_adapter(
     *,
     adapters: list[Path | str],
@@ -156,8 +165,13 @@ def evaluate_adapter(
     max_new_tokens: int = 128,
     max_length: int = DEFAULT_MAX_LENGTH,
     repair: bool = True,
+    base_report: Path | str | None = None,
 ) -> dict:
-    """Guard, load the PC base once, then score no-adapter and each adapter."""
+    """Guard, load the PC base once, then score no-adapter and each adapter.
+
+    ``base_report`` reuses the no-adapter score of an earlier report on the same
+    holdout instead of spending a full pass re-scoring the unchanged base model.
+    """
     limits = common.assert_guarded_scope()
     print(json.dumps({"guard": "cgroup", **limits}), flush=True)
     free, total = common.assert_gpu_headroom()
@@ -187,19 +201,24 @@ def evaluate_adapter(
     print(json.dumps({"phase": "loading", "base": str(base)}), flush=True)
     model = client.load_base_model(Path(base), "cuda", {})
 
-    print(json.dumps({"phase": "before", "cases": len(cases)}), flush=True)
-    before = common.evaluate_cases(
-        model, tokenizer, cases, snapshot, "cuda",
-        max_new_tokens=max_new_tokens, verified_codes=codes, facts=taught_facts,
-        repair=repair,
-    )
-    base_case_losses = heldout_case_losses(model, tokenizer, cases, "cuda", max_length,
-                                           taught_facts)
-    base_loss = mean_loss(base_case_losses)
-    base_summary = common.summarise_records(before)
-    base_summary["loss"] = base_loss
-    base_summary["case_losses"] = base_case_losses
-    base_summary["records"] = before
+    if base_report is not None:
+        base_summary, before = reuse_base(base_report, cases)
+        base_loss = base_summary["loss"]
+        print(json.dumps({"phase": "before_reused", "from": str(base_report)}), flush=True)
+    else:
+        print(json.dumps({"phase": "before", "cases": len(cases)}), flush=True)
+        before = common.evaluate_cases(
+            model, tokenizer, cases, snapshot, "cuda",
+            max_new_tokens=max_new_tokens, verified_codes=codes, facts=taught_facts,
+            repair=repair,
+        )
+        base_case_losses = heldout_case_losses(model, tokenizer, cases, "cuda",
+                                               max_length, taught_facts)
+        base_loss = mean_loss(base_case_losses)
+        base_summary = common.summarise_records(before)
+        base_summary["loss"] = base_loss
+        base_summary["case_losses"] = base_case_losses
+        base_summary["records"] = before
     print(json.dumps({"phase": "before_done", "passed": count_passed(before),
                       "loss": base_loss, "interval": base_summary["interval"]}), flush=True)
 
@@ -277,6 +296,8 @@ def parse_args(argv: list[str] | None = None):
                         help="token budget for the held-out loss")
     parser.add_argument("--no-repair", dest="repair", action="store_false",
                         help="skip the repair pass (passed_repair) and its extra generations")
+    parser.add_argument("--base-report", default=None,
+                        help="reuse the no-adapter score from this earlier report")
     return parser.parse_args(argv)
 
 
@@ -294,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         max_new_tokens=args.max_new_tokens,
         max_length=args.max_length,
         repair=args.repair,
+        base_report=args.base_report,
     )
     return 0
 

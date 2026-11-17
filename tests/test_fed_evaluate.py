@@ -280,3 +280,18 @@ def test_cli_defaults_and_no_repair_flag():
     base = ["--adapter", "a", "--out", "o.json"]
     assert evaluate_adapter.parse_args(base).repair is True
     assert evaluate_adapter.parse_args([*base, "--no-repair"]).repair is False
+
+
+def test_reuse_base_checks_the_holdout_ids(tmp_path):
+    import json
+
+    import pytest
+
+    from fedrag.hw_training import evaluate_adapter as ev
+
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"base": {"loss": 0.3}, "before": [{"id": "a"}, {"id": "b"}]}))
+    summary, before = ev.reuse_base(report, [{"id": "a"}, {"id": "b"}])
+    assert summary["loss"] == 0.3 and [r["id"] for r in before] == ["a", "b"]
+    with pytest.raises(RuntimeError):
+        ev.reuse_base(report, [{"id": "a"}, {"id": "c"}])
