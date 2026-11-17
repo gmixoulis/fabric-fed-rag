@@ -10,6 +10,7 @@ Uses:
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import re
@@ -25,6 +26,10 @@ if str(_ROOT) not in sys.path:
 
 from fedrag.node_service import make_client_ssl_context, mtls_request  # noqa: E402
 from scripts.run_demo import connect_kubo_private_swarm, make_minimal_pdf, wait_for_nodes  # noqa: E402
+
+# Same default snapshot as fedrag/hw_training/evaluate_adapter.py.
+DEFAULT_SNAPSHOT = Path.home() / ".local/share/softone-chat/snapshots/softone_reputation.sqlite"
+REFUSAL_TOKEN = "CANNOT_ANSWER"
 
 SCHEMA_DDL = """
 CREATE TABLE TRDR (
@@ -153,6 +158,14 @@ def build_eval_sqlite() -> sqlite3.Connection:
     return conn
 
 
+def open_eval_db(snapshot: Path) -> tuple[sqlite3.Connection, bool]:
+    """Open the real snapshot read-only, or fall back to the toy DB (flagged)."""
+    snapshot = Path(snapshot).expanduser()
+    if snapshot.is_file():
+        return sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True), True
+    return build_eval_sqlite(), False
+
+
 def extract_unlocked_codes(chunks: list[dict]) -> dict[tuple[str, str], set[str]]:
     """Parse verified (TABLE, COLUMN, CODE) triples taught in retrieved hash-verified RAG chunks."""
     unlocked: dict[tuple[str, str], set[str]] = {}
@@ -217,15 +230,189 @@ def ollama_generate_sql(question: str, retrieved_chunks: list[dict], model: str 
     return raw.strip()
 
 
-def normalize_rows(rows: list[tuple]) -> list[tuple]:
-    out = []
-    for row in rows:
-        norm_row = tuple(round(float(x), 2) if isinstance(x, float) else x for x in row)
-        out.append(norm_row)
-    return out
+def sql_equivalent(a: str, b: str) -> bool:
+    """SQL equality after whitespace/case normalisation (for empty-vs-empty)."""
+    def norm(sql: str) -> str:
+        return " ".join(sql.lower().split()).rstrip(";").strip()
+
+    return norm(a) == norm(b)
+
+
+def _norm_value(value):
+    if value is None:
+        return ("z", 0.0)
+    if isinstance(value, (int, float)):
+        return ("n", round(float(value), 6))
+    return ("s", str(value))
+
+
+def results_equal(actual: list[tuple], gold: list[tuple], ordered: bool) -> bool:
+    """Row equality at 6 decimals; order kept only when the gold SQL orders."""
+    keys_a = [tuple(_norm_value(v) for v in row) for row in actual]
+    keys_b = [tuple(_norm_value(v) for v in row) for row in gold]
+    return keys_a == keys_b if ordered else sorted(keys_a) == sorted(keys_b)
+
+
+def gold_is_ordered(sql: str) -> bool:
+    return bool(re.search(r"\border\s+by\b", str(sql or ""), re.IGNORECASE))
+
+
+def score_case(conn: sqlite3.Connection, case: dict, gen_sql: str,
+               unlocked: dict[tuple[str, str], set[str]]) -> dict:
+    """Score one reply: guard + result equality; gold errors never pass.
+
+    Status notes carry no result rows: this repo is public and snapshot data
+    must not reach stdout or reports.
+    """
+    gold_sql = case["sql"]
+    refusal = case.get("group") == "refuse" or gold_sql.strip() == REFUSAL_TOKEN
+    if refusal:
+        passed = REFUSAL_TOKEN in gen_sql.upper()
+        return {"passed": passed, "gold_error": False,
+                "status": "PASS" if passed else "EXPECTED_REFUSAL"}
+    try:
+        gold_rows = conn.execute(gold_sql).fetchall()
+    except Exception as exc:
+        return {"passed": False, "gold_error": True, "status": f"GOLD_ERROR ({exc})"}
+
+    guard_ok, checked_or_reason = check_sql_guard(gen_sql, unlocked)
+    if not guard_ok:
+        return {"passed": False, "gold_error": False,
+                "status": f"GUARD_BLOCKED ({checked_or_reason})"}
+    try:
+        actual_rows = conn.execute(checked_or_reason).fetchall()
+    except Exception as exc:
+        return {"passed": False, "gold_error": False, "status": f"SQL_ERROR ({exc})"}
+
+    if not actual_rows and not gold_rows:
+        # Two empty results pass only when the SQL itself is equivalent.
+        passed = sql_equivalent(gold_sql, checked_or_reason)
+        status = "PASS" if passed else "EMPTY_MISMATCH"
+    else:
+        passed = results_equal(actual_rows, gold_rows, gold_is_ordered(gold_sql))
+        status = "PASS" if passed else "ROW_MISMATCH"
+    return {"passed": passed, "gold_error": False, "status": status}
+
+
+def case_groups(cases: list[dict]) -> list[str]:
+    """Group names in first-seen order, for dynamic report columns."""
+    return list(dict.fromkeys(case.get("group") or "other" for case in cases))
+
+
+def evaluate_condition(conn: sqlite3.Connection, cases: list[dict], mode_label: str,
+                       retrieve, generate=None) -> dict:
+    """Score one condition; ``retrieve(question)`` returns RAG chunks and
+    ``generate(question, chunks)`` returns the model SQL (or CANNOT_ANSWER)."""
+    if generate is None:
+        generate = ollama_generate_sql
+    groups = case_groups(cases)
+    group_counts = {g: [0, 0] for g in groups}
+    passed_count = 0
+    gold_errors = 0
+    case_records = []
+    t_mode = time.time()
+    print(f"\n--- Condition: {mode_label} ---")
+    for case in cases:
+        t0 = time.time()
+        q = case["question"]
+        chunks = retrieve(q)
+        unlocked = extract_unlocked_codes(chunks)
+        gen_sql = generate(q, chunks)
+        scored = score_case(conn, case, gen_sql, unlocked)
+        passed = scored["passed"]
+        if passed:
+            passed_count += 1
+            group_counts[case.get("group") or "other"][0] += 1
+        group_counts[case.get("group") or "other"][1] += 1
+        if scored["gold_error"]:
+            gold_errors += 1
+        elapsed = round(time.time() - t0, 2)
+        print(f"   [{case['id']}] {'PASS' if passed else 'FAIL'} ({elapsed}s) | "
+              f"Q: {q} -> {gen_sql} | {scored['status']}")
+        case_records.append(
+            {
+                "id": case["id"],
+                "question": q,
+                "gold_sql": case["sql"],
+                "generated_sql": gen_sql,
+                "passed": passed,
+                "gold_error": scored["gold_error"],
+                "status": scored["status"],
+                "elapsed_s": elapsed,
+            }
+        )
+
+    total_time = round(time.time() - t_mode, 2)
+    rate = 100.0 * passed_count / len(cases) if cases else 0.0
+    print(f"   >>> Score for {mode_label}: {passed_count}/{len(cases)} ({rate:.1f}%) "
+          f"[gold_error: {gold_errors}] in {total_time}s")
+    return {
+        "label": mode_label,
+        "passed": passed_count,
+        "total": len(cases),
+        "gold_error": gold_errors,
+        "pass_rate_pct": round(rate, 1),
+        "seconds": total_time,
+        "groups": group_counts,
+        "cases": case_records,
+    }
+
+
+def build_eval_report_lines(cases: list[dict], eval_summary: dict, db_note: str) -> list[str]:
+    """Section 2 of the report: dynamic case count, group columns, per-case table."""
+    groups = case_groups(cases)
+    mode_keys = ("no_rag", "single_shard_node1", "decentralized_50_50_rag")
+    lines = [
+        "",
+        f"## 2. Held-Out Evaluation (`eval/softone_holdout.jsonl`, {len(cases)} Cases, EN + EL, `qwen3.5:4b`)",
+        "",
+        db_note,
+        "",
+        "| Experimental Condition | Passed | Pass Rate | "
+        + " | ".join(groups) + " | Gold Errors | Time |",
+        "|" + "---|" * (5 + len(groups)),
+    ]
+    for mode_key in mode_keys:
+        info = eval_summary[mode_key]
+        cells = " | ".join(f"{info['groups'][g][0]}/{info['groups'][g][1]}" for g in groups)
+        lines.append(
+            f"| **{info['label']}** | **{info['passed']}/{info['total']}** | **{info['pass_rate_pct']}%** | "
+            f"{cells} | {info['gold_error']} | {info['seconds']} s |"
+        )
+
+    lines += [
+        "",
+        "### Per-Case Breakdown across Topologies",
+        "",
+        "| Case ID | Question | No-RAG | Single-Shard (50%) | Decentralized 50/50 RAG | Generated SQL (Decentralized) |",
+        "|---|---|---|---|---|---|",
+    ]
+
+    def cell(mode_key: str, idx: int) -> str:
+        rec = eval_summary[mode_key]["cases"][idx]
+        if rec["gold_error"]:
+            return "GOLD_ERROR"
+        return "PASS" if rec["passed"] else "FAIL"
+
+    for idx, case in enumerate(cases):
+        c_dec_rec = eval_summary["decentralized_50_50_rag"]["cases"][idx]
+        lines.append(
+            f"| `{case['id']}` | {case['question']} | {cell('no_rag', idx)} | "
+            f"{cell('single_shard_node1', idx)} | **{cell('decentralized_50_50_rag', idx)}** | "
+            f"`{c_dec_rec['generated_sql']}` |"
+        )
+    return lines
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Real-case end-to-end evaluation on the live cluster.")
+    parser.add_argument("--snapshot", default=str(DEFAULT_SNAPSHOT),
+                        help="SoftOne snapshot scored read-only; falls back to the toy DB when missing")
+    parser.add_argument("--limit", type=int, default=None, help="score only the first N holdout cases")
+    parser.add_argument("--out-dir", default=str(_ROOT / "results"),
+                        help="directory for real_eval_raw.json and the Excel/CSV exports")
+    args = parser.parse_args()
+
     certs = Path(_ROOT / "certs")
     ssl_ctx = make_client_ssl_context(
         str(certs / "ca.crt"),
@@ -264,6 +451,8 @@ def main() -> None:
         for line in (_ROOT / "eval/softone_holdout.jsonl").read_text().splitlines()
         if line.strip()
     ]
+    if args.limit is not None:
+        holdout = holdout[: args.limit]
 
     # Split the 15 taught facts and 16 training examples 50/50 across Shard 1 (TRDR + MTRL) and Shard 2 (FINDOC)
     trdr_facts = [f["text"] for f in facts if f["table_name"] == "TRDR"]
@@ -350,8 +539,16 @@ def main() -> None:
             f"chunks={len(doc['chunks'])} | Raft block #{res['raft_block_index']}"
         )
 
-    print("\n=== 3. Evaluating Real Held-Out Set (12 Cases, EN+EL) with qwen3.5:4b & embeddinggemma ===")
-    conn = build_eval_sqlite()
+    print(f"\n=== 3. Evaluating Real Held-Out Set ({len(holdout)} Cases, EN+EL) with qwen3.5:4b & embeddinggemma ===")
+    conn, is_snapshot = open_eval_db(Path(args.snapshot))
+    if is_snapshot:
+        db_note = f"Scoring database: read-only SoftOne snapshot (`{args.snapshot}`)."
+        print(f"Scoring on read-only snapshot: {args.snapshot}")
+    else:
+        db_note = ("**WARNING: toy database, numbers not comparable** — snapshot not found at "
+                   f"`{args.snapshot}`; scored on the built-in `build_eval_sqlite()` rows.")
+        print(f"WARNING: snapshot not found at {args.snapshot}; falling back to build_eval_sqlite() "
+              "— toy database, numbers not comparable")
     modes = [
         ("no_rag", "0% PDFs (No RAG / Base qwen3.5:4b)"),
         ("single_shard_node1", "50% PDFs (Node 1 Shard 1 Only)"),
@@ -359,76 +556,28 @@ def main() -> None:
     ]
     eval_summary: dict[str, dict] = {}
 
-    for mode_key, mode_label in modes:
-        passed_count = 0
-        case_records = []
-        t_mode = time.time()
-        print(f"\n--- Condition: {mode_label} ---")
-        for case in holdout:
-            t0 = time.time()
-            q = case["question"]
-            gold_sql = case["sql"]
-            gold_rows = normalize_rows(conn.execute(gold_sql).fetchall())
-
+    def make_retrieve(mode_key: str):
+        def retrieve(q: str) -> list[dict]:
             if mode_key == "no_rag":
-                chunks = []
-            elif mode_key == "single_shard_node1":
+                return []
+            if mode_key == "single_shard_node1":
                 r_local = mtls_request(
                     ssl_ctx, f"{node1_rag}/rag/search-local", method="POST", payload={"query": q, "k": 15}
                 )
-                chunks = [{**c, "ledger_hash_verified": True} for c in r_local["results"]]
-            else:
-                r_dec = mtls_request(
-                    ssl_ctx,
-                    f"{node1_rag}/rag/query-decentralized",
-                    method="POST",
-                    payload={"query": q, "k": 15},
-                )
-                chunks = r_dec["top_k"]
-
-            unlocked = extract_unlocked_codes(chunks)
-            gen_sql = ollama_generate_sql(q, chunks, model="qwen3.5:4b")
-            guard_ok, checked_or_reason = check_sql_guard(gen_sql, unlocked)
-
-            passed = False
-            status_note = ""
-            if not guard_ok:
-                status_note = f"GUARD_BLOCKED ({checked_or_reason})"
-            else:
-                try:
-                    actual_rows = normalize_rows(conn.execute(checked_or_reason).fetchall())
-                    passed = actual_rows == gold_rows
-                    status_note = "PASS" if passed else f"ROW_MISMATCH (got {actual_rows} vs {gold_rows})"
-                except Exception as exc:
-                    status_note = f"SQL_ERROR ({exc})"
-
-            if passed:
-                passed_count += 1
-            elapsed = round(time.time() - t0, 2)
-            print(f"   [{case['id']}] {'PASS' if passed else 'FAIL'} ({elapsed}s) | Q: {q} -> {gen_sql} | {status_note}")
-            case_records.append(
-                {
-                    "id": case["id"],
-                    "question": q,
-                    "gold_sql": gold_sql,
-                    "generated_sql": gen_sql,
-                    "passed": passed,
-                    "status": status_note,
-                    "elapsed_s": elapsed,
-                }
+                return [{**c, "ledger_hash_verified": True} for c in r_local["results"]]
+            r_dec = mtls_request(
+                ssl_ctx,
+                f"{node1_rag}/rag/query-decentralized",
+                method="POST",
+                payload={"query": q, "k": 15},
             )
+            return r_dec["top_k"]
+        return retrieve
 
-        total_time = round(time.time() - t_mode, 2)
-        rate = 100.0 * passed_count / len(holdout)
-        print(f"   >>> Score for {mode_label}: {passed_count}/{len(holdout)} ({rate:.1f}%) in {total_time}s")
-        eval_summary[mode_key] = {
-            "label": mode_label,
-            "passed": passed_count,
-            "total": len(holdout),
-            "pass_rate_pct": round(rate, 1),
-            "seconds": total_time,
-            "cases": case_records,
-        }
+    for mode_key, mode_label in modes:
+        eval_summary[mode_key] = evaluate_condition(
+            conn, holdout, mode_label, make_retrieve(mode_key)
+        )
 
     print("\n=== 4. Running 5-Round Federated LoRA Ablation (FedAvg-LoRA vs. FFA-LoRA) on 16 Seed Pairs ===")
     lora_ablation: dict[str, list[dict]] = {"fedavg": [], "ffa": []}
@@ -460,6 +609,8 @@ def main() -> None:
         "(`node1-maestro`, `node2-peer`, `ipfs-node1`, `ipfs-node2`)",
         "connected to host Ollama (`embeddinggemma:latest` 768-d semantic embeddings + `qwen3.5:4b` SQL generator).",
         "",
+        db_note,
+        "",
         "## 1. 50/50 Sharded PDF Corpus & Private Kubo IPFS CIDs (`LIBP2P_FORCE_PNET=1`)",
         "",
         "| Document ID | Active Shard Owner | Metadata + Backup Peer | Kubo IPFS CIDv1 | PDF SHA-256 | Chunks |",
@@ -471,37 +622,7 @@ def main() -> None:
             f"`{m['ipfs_cid']}` | `{m['pdf_sha256'][:16]}...` | {m['num_chunks']} |"
         )
 
-    report_lines += [
-        "",
-        "## 2. Held-Out Evaluation (`eval/softone_holdout.jsonl`, 12 Cases, EN + EL, `qwen3.5:4b`)",
-        "",
-        "| Experimental Condition | Passed | Pass Rate | Plain (`hp01–06`) | Code (`hc01–06`) | Time |",
-        "|---|---|---|---|---|---|",
-    ]
-    for mode_key in ("no_rag", "single_shard_node1", "decentralized_50_50_rag"):
-        info = eval_summary[mode_key]
-        hp_pass = sum(1 for c in info["cases"] if c["id"].startswith("hp") and c["passed"])
-        hc_pass = sum(1 for c in info["cases"] if c["id"].startswith("hc") and c["passed"])
-        report_lines.append(
-            f"| **{info['label']}** | **{info['passed']}/{info['total']}** | **{info['pass_rate_pct']}%** | "
-            f"{hp_pass}/6 | {hc_pass}/6 | {info['seconds']} s |"
-        )
-
-    report_lines += [
-        "",
-        "### Per-Case Breakdown across Topologies",
-        "",
-        "| Case ID | Question | No-RAG | Single-Shard (50%) | Decentralized 50/50 RAG | Generated SQL (Decentralized) |",
-        "|---|---|---|---|---|---|",
-    ]
-    for idx, case in enumerate(holdout):
-        c_no = "PASS" if eval_summary["no_rag"]["cases"][idx]["passed"] else "FAIL"
-        c_s1 = "PASS" if eval_summary["single_shard_node1"]["cases"][idx]["passed"] else "FAIL"
-        c_dec_rec = eval_summary["decentralized_50_50_rag"]["cases"][idx]
-        c_dec = "PASS" if c_dec_rec["passed"] else "FAIL"
-        report_lines.append(
-            f"| `{case['id']}` | {case['question']} | {c_no} | {c_s1} | **{c_dec}** | `{c_dec_rec['generated_sql']}` |"
-        )
+    report_lines += build_eval_report_lines(holdout, eval_summary, db_note)
 
     report_lines += [
         "",
@@ -534,7 +655,7 @@ def main() -> None:
     report_path.write_text("\n".join(report_lines) + "\n")
     print(f"\nWrote real evaluation report to {report_path}")
 
-    results_dir = _ROOT / "results"
+    results_dir = Path(args.out_dir).expanduser()
     results_dir.mkdir(parents=True, exist_ok=True)
     raw_json_path = results_dir / "real_eval_raw.json"
     raw_json_path.write_text(
