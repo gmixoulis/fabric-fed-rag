@@ -13,6 +13,7 @@ exist and no weights are loaded at import time.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -142,11 +143,17 @@ def load_seed_examples(root: Path) -> list[dict]:
     return examples
 
 
-def prompt_text(question: str) -> str:
-    """The production prompt text for one question (needs the repo venv)."""
+def prompt_text(question: str, facts: list[dict] | None = None,
+                error: str | None = None) -> str:
+    """The production prompt text for one question (needs the repo venv).
+
+    ``error`` is the guard rejection or database error of the previous attempt,
+    passed to ``build_prompt`` exactly as the live repair loop does.
+    """
     from softone_rag import graph, real_catalog
 
-    return graph.build_prompt(question, list(real_catalog.TABLES), data_catalog=real_catalog)
+    return graph.build_prompt(question, list(real_catalog.TABLES), error=error,
+                              data_catalog=real_catalog, memories=facts)
 
 
 def render_chat(tokenizer, prompt: str) -> str:
@@ -159,12 +166,14 @@ def render_chat(tokenizer, prompt: str) -> str:
     )
 
 
-def chat_prompt(tokenizer, question: str) -> str:
+def chat_prompt(tokenizer, question: str, facts: list[dict] | None = None,
+                error: str | None = None) -> str:
     """Render the production prompt for one question with the Qwen chat template."""
-    return render_chat(tokenizer, prompt_text(question))
+    return render_chat(tokenizer, prompt_text(question, facts=facts, error=error))
 
 
-def prepare_texts(root: Path, examples: list[dict] | None = None) -> list[dict]:
+def prepare_texts(root: Path, examples: list[dict] | None = None,
+                  facts: list[dict] | None = None) -> list[dict]:
     """(prompt, target) texts, so a shard needs only a tokenizer to train.
 
     The prompt is the plain catalog prompt, not chat-templated: each client
@@ -176,7 +185,7 @@ def prepare_texts(root: Path, examples: list[dict] | None = None) -> list[dict]:
         {
             "id": index,
             "question": example["question"],
-            "prompt": prompt_text(example["question"]),
+            "prompt": prompt_text(example["question"], facts=facts),
             "target": example["sql"],
         }
         for index, example in enumerate(items)
@@ -233,6 +242,28 @@ def load_cases(path: Path | str) -> list[dict]:
     return cases
 
 
+def load_taught_facts(path: Path | str) -> list[dict]:
+    """Read taught facts (``eval/taught_facts.jsonl`` shape), each tagged as a fact.
+
+    The production prompt passes every taught fact as ``memories``; this loader
+    adds the ``kind == "fact"`` marker ``build_prompt`` filters on, keeping file
+    order so the prompt prefix stays stable.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"no such JSONL file: {path}")
+    facts = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        record["kind"] = "fact"
+        facts.append(record)
+    if not facts:
+        raise ValueError(f"{path} holds no taught facts")
+    return facts
+
+
 def assert_no_question_overlap(cases: list[dict], training: list[dict],
                                label: str = "held-out") -> None:
     """Fail loudly when an evaluation question is also a training question."""
@@ -265,65 +296,263 @@ def generate_text(model, tokenizer, prompt: str, device: str,
                             skip_special_tokens=True)
 
 
+REFUSAL_TOKEN = "CANNOT_ANSWER"
+
+
+def is_refusal_case(case: dict) -> bool:
+    """True when the gold answer is a refusal: empty SQL or the literal token."""
+    sql = str(case.get("sql") or "").strip()
+    return not sql or sql == REFUSAL_TOKEN
+
+
 def case_passes(text: str, case: dict, snapshot, verified_codes=None) -> bool:
     """Did a reply answer the case: guarded SQL whose rows match the gold rows.
 
-    A case with no gold SQL expects a refusal, which is how the single-machine
-    trainer's ``CANNOT_ANSWER`` cases are expressed. Otherwise the reply must
-    contain SQL that the guard accepts with the catalog and the taught codes, and
-    that SQL must return the same rows as the gold SQL.
+    A case whose gold SQL is empty or the literal refusal token expects a
+    refusal, which is how the single-machine trainer's ``CANNOT_ANSWER`` cases
+    are expressed. Otherwise the reply must contain SQL that the guard accepts
+    with the catalog and the taught codes, and that SQL must return the same rows
+    as the gold SQL.
+    """
+    return score_reply(text, case, snapshot, verified_codes)["passed"]
+
+
+# The guard reason graph.validate turns into a refusal instead of a repair; it is
+# a literal there, not an exported constant.
+UNVERIFIED_CODE_REASON = "unverified SoftOne type or cancellation code"
+LENIENT_DECIMALS = 2
+
+
+def _lenient_value(value):
+    """``evaluate._norm_value`` with numbers rounded to ``LENIENT_DECIMALS``."""
+    if value is None:
+        return ("z", 0.0)
+    if isinstance(value, bool):
+        return ("b", 1.0 if value else 0.0)
+    if isinstance(value, (int, float)):
+        return ("n", round(float(value), LENIENT_DECIMALS))
+    return ("s", str(value))
+
+
+def results_match_lenient(actual, expected, ordered: bool) -> bool:
+    """Gold rows found in the reply rows at 2 decimals, extra reply columns allowed.
+
+    Every gold column must map to a distinct reply column so that the reply rows,
+    projected onto those columns, equal the gold rows (same row count; order kept
+    when the gold SQL orders).
+    """
+    if len(actual) != len(expected) or not expected:
+        return False
+    gold = [tuple(_lenient_value(value) for value in row) for row in expected]
+    got = [tuple(_lenient_value(value) for value in row) for row in actual]
+    width, reply_width = len(gold[0]), len(got[0])
+    if reply_width < width:
+        return False
+
+    def same(left, right):
+        return left == right if ordered else sorted(left) == sorted(right)
+
+    candidates = [
+        [k for k in range(reply_width)
+         if same([row[k] for row in got], [row[j] for row in gold])]
+        for j in range(width)
+    ]
+
+    def search(used: list[int]) -> bool:
+        if len(used) == width:
+            return same([tuple(row[k] for k in used) for row in got], gold)
+        return any(search(used + [k]) for k in candidates[len(used)] if k not in used)
+
+    return search([])
+
+
+def score_reply(text: str, case: dict, snapshot, verified_codes=None) -> dict:
+    """Score one reply: ``passed`` (strict), ``passed_lenient`` and ``repair_error``.
+
+    ``passed`` is the strict single-shot rule documented in ``case_passes``.
+    ``passed_lenient`` also accepts numbers equal at 2 decimals and extra reply
+    columns (``results_match_lenient``). ``repair_error`` is the guard reason or
+    database error that ``graph.validate`` / ``graph.execute`` would feed back for
+    a repair; it is empty when production would not retry this reply (it passed,
+    refused, held no SQL, or hit the unverified-code refusal).
     """
     from softone_rag import db, graph, guard, real_catalog
     from softone_rag import evaluate as evaluator
     from softone_rag.llm import CANNOT_ANSWER
 
-    if not case.get("sql"):
-        return CANNOT_ANSWER in text
+    result = {"passed": False, "passed_lenient": False, "repair_error": ""}
+    refused = CANNOT_ANSWER in text
+    refusal = is_refusal_case(case)
+    if refusal and refused:
+        result["passed"] = result["passed_lenient"] = True
+        return result
     sql = graph.extract_sql(text)
     if sql is None:
-        return False
+        return result
     checked = guard.validate_sql(sql, real_catalog.ALLOWED_TABLES,
                                  real_catalog.UNVERIFIED_CODES, verified_codes or {})
     if not checked.ok:
-        return False
+        if not refused and checked.reason != UNVERIFIED_CODE_REASON:
+            result["repair_error"] = checked.reason
+        return result
     try:
         _, actual = db.query(snapshot, checked.sql)
+    except db.DatabaseError as error:
+        if not refused:
+            result["repair_error"] = str(error)
+        return result
+    if refusal:
+        return result
+    try:
         _, expected = db.query(snapshot, case["sql"])
     except db.DatabaseError:
-        return False
+        return result
     if not actual and not expected:
         # Two empty results are not a match; the SQL itself must be equivalent.
-        return evaluator.sql_equivalent(case["sql"], checked.sql)
-    return evaluator.results_equal(actual, expected, gold_is_ordered(case["sql"]))
+        result["passed"] = result["passed_lenient"] = evaluator.sql_equivalent(
+            case["sql"], checked.sql)
+        return result
+    ordered = gold_is_ordered(case["sql"])
+    result["passed"] = evaluator.results_equal(actual, expected, ordered)
+    result["passed_lenient"] = (result["passed"]
+                                or results_match_lenient(actual, expected, ordered))
+    return result
 
 
 def evaluate_cases(model, tokenizer, cases: list[dict], snapshot, device: str,
                    max_new_tokens: int = 128,
-                   verified_codes=None) -> list[dict]:
+                   verified_codes=None,
+                   facts: list[dict] | None = None,
+                   repair: bool = True,
+                   generate=None) -> list[dict]:
     """Score every held-out case at one point in time; one record per case.
 
     ``verified_codes`` is the same ``(TABLE, COLUMN) -> {values}`` mapping the live
     pipeline gets from ``MemoryStore.verified_codes``; without it the guard
     rejects every comparison against an unverified code column, which is the
     honest outcome when nobody has taught those codes.
+
+    ``passed`` is the strict single-shot score. ``passed_lenient`` scores the same
+    first reply leniently. With ``repair``, a reply the guard rejects or the
+    database refuses is regenerated with the error in ``build_prompt(error=...)``
+    for up to ``graph.MAX_REPAIRS`` attempts, as the live pipeline does, and the
+    last reply is scored strictly as ``passed_repair``. ``generate`` maps a
+    rendered prompt to a reply; it defaults to greedy ``generate_text``.
+
+    The ``softone_rag`` modules are imported once before any case runs so a
+    missing package stops the whole evaluation instead of scoring every case as
+    the same per-case import error.
     """
     import time
 
+    # Fail fast: a missing softone_rag (or one of its dependencies) must stop the
+    # evaluation, never be recorded as one error per case.
+    from softone_rag import db, graph, guard, real_catalog  # noqa: F401
+    from softone_rag import evaluate as evaluator  # noqa: F401
+    from softone_rag.llm import CANNOT_ANSWER  # noqa: F401
+
     device = str(device)
     model.eval()
+    if generate is None:
+        def generate(prompt: str) -> str:
+            return generate_text(model, tokenizer, prompt, device, max_new_tokens)
+
     results = []
     for case in cases:
         started = time.monotonic()
-        record = {"id": case["id"], "passed": False, "seconds": 0.0}
+        record = {"id": case["id"], "passed": False, "passed_lenient": False,
+                  "seconds": 0.0, "group": case.get("group", ""),
+                  "sql_in_train": case.get("sql_in_train"), "reply": ""}
+        if repair:
+            record["passed_repair"] = False
+            record["repairs"] = 0
         try:
-            prompt = chat_prompt(tokenizer, case["question"])
-            text = generate_text(model, tokenizer, prompt, device, max_new_tokens)
-            record["passed"] = case_passes(text, case, snapshot, verified_codes)
+            prompt = chat_prompt(tokenizer, case["question"], facts=facts)
+            text = generate(prompt)
+            record["reply"] = text[:500]
+            scored = score_reply(text, case, snapshot, verified_codes)
+            record["passed"] = scored["passed"]
+            record["passed_lenient"] = scored["passed_lenient"]
+            if repair:
+                while scored["repair_error"] and record["repairs"] < graph.MAX_REPAIRS:
+                    record["repairs"] += 1
+                    prompt = chat_prompt(tokenizer, case["question"], facts=facts,
+                                         error=scored["repair_error"])
+                    scored = score_reply(generate(prompt), case, snapshot, verified_codes)
+                record["passed_repair"] = scored["passed"]
+        except ImportError:
+            raise
         except Exception as error:  # one broken case must not end the evaluation
             record["error"] = f"{type(error).__name__}: {error}"
         record["seconds"] = round(time.monotonic() - started, 2)
         results.append(record)
     return results
+
+
+def wilson_interval(passed: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval as fractions rounded to 4 places; (0.0, 0.0) for no cases."""
+    passed = int(passed)
+    total = int(total)
+    if total <= 0:
+        return (0.0, 0.0)
+    if passed < 0 or passed > total:
+        raise ValueError(f"passed {passed} out of range for {total} cases")
+    n = float(total)
+    p_hat = passed / n
+    z_squared = z * z
+    denominator = 1.0 + z_squared / n
+    centre = (p_hat + z_squared / (2.0 * n)) / denominator
+    margin = z * math.sqrt((p_hat * (1.0 - p_hat) + z_squared / (4.0 * n)) / n) / denominator
+    return (round(max(0.0, centre - margin), 4), round(min(1.0, centre + margin), 4))
+
+
+EXTRA_SCORES = ("passed_repair", "passed_lenient")
+
+
+def summarise_records(records: list[dict]) -> dict:
+    """``passed``, ``cases``, a Wilson interval and per-group / per-``sql_in_train`` splits.
+
+    ``passed_repair`` and ``passed_lenient`` are counted (overall and in
+    ``by_sql_in_train``) only when the records carry them, so older reports and a
+    ``--no-repair`` run summarise without invented zeros.
+    """
+    passed = sum(1 for record in records if record.get("passed"))
+    by_group: dict[str, dict[str, int]] = {}
+    for record in records:
+        group = record.get("group", "")
+        entry = by_group.setdefault(group, {"passed": 0, "cases": 0})
+        entry["cases"] += 1
+        if record.get("passed"):
+            entry["passed"] += 1
+    extra = [key for key in EXTRA_SCORES if any(key in record for record in records)]
+    by_sql_in_train: dict[str, dict[str, int]] = {}
+    for record in records:
+        flag = record.get("sql_in_train")
+        label = "true" if flag is True else "false" if flag is False else "unknown"
+        entry = by_sql_in_train.setdefault(
+            label, {"passed": 0, "cases": 0, **{key: 0 for key in extra}})
+        entry["cases"] += 1
+        for key in ("passed", *extra):
+            if record.get(key):
+                entry[key] += 1
+    summary = {
+        "passed": passed,
+        "cases": len(records),
+        "interval": list(wilson_interval(passed, len(records))),
+        "by_group": by_group,
+        "by_sql_in_train": by_sql_in_train,
+    }
+    for key in extra:
+        summary[key] = sum(1 for record in records if record.get(key))
+    return summary
+
+
+def compare_records(base: list[dict], other: list[dict]) -> dict:
+    """Case ids that pass in ``other`` but not ``base`` (gained) and the reverse (lost)."""
+    base_passed = {record["id"] for record in base if record.get("passed")}
+    other_passed = {record["id"] for record in other if record.get("passed")}
+    return {"gained": sorted(other_passed - base_passed),
+            "lost": sorted(base_passed - other_passed)}
 
 
 # --------------------------------------------------------------------------- #
@@ -347,6 +576,8 @@ def load_config(path: Path) -> dict:
         (int(lora["alpha"]) >= 1, "lora.alpha must be >= 1"),
         (0.0 <= float(lora["dropout"]) < 1.0, "lora.dropout must be in [0, 1)"),
         (len(lora["target_modules"]) >= 1, "lora.target_modules must not be empty"),
+        ("use_dora" not in lora or isinstance(lora["use_dora"], bool),
+         "lora.use_dora must be a bool"),
         (int(config["max_length"]) >= 64, "max_length must be >= 64"),
         (0.0 < float(config["mps_memory_fraction"]) <= 1.0,
          "mps_memory_fraction must be in (0, 1]"),
@@ -370,6 +601,7 @@ def lora_kwargs(config: dict) -> dict:
         "lora_alpha": int(lora["alpha"]),
         "lora_dropout": float(lora["dropout"]),
         "target_modules": list(lora["target_modules"]),
+        "use_dora": bool(lora.get("use_dora", False)),
         "bias": "none",
         "task_type": "CAUSAL_LM",
     }
