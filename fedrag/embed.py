@@ -52,6 +52,7 @@ class HashEmbedder:
     """Deterministic lexical embedder for fast container and offline execution."""
 
     model = "hash-embedder-v1"
+    digest = hashlib.sha256(model.encode()).hexdigest()
 
     def embed(self, texts: list[str]) -> np.ndarray:
         vecs = np.zeros((len(texts), DIM), dtype=np.float64)
@@ -77,9 +78,19 @@ class OllamaEmbedder:
         ).rstrip("/")
         self.timeout = timeout
 
+    @property
+    def digest(self) -> str:
+        with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=self.timeout) as resp:
+            models = json.load(resp)["models"]
+        name = self.model if ":" in self.model else f"{self.model}:latest"
+        digest = next((m["digest"] for m in models if m["name"] == name), "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Missing or invalid Ollama model digest for {name}")
+        return digest
+
     def embed(self, texts: list[str]) -> np.ndarray:
         payload = json.dumps(
-            {"model": self.model, "input": texts, "keep_alive": "30m"}
+            {"model": self.model, "input": texts, "keep_alive": "30m", "options": {"num_gpu": 0}}
         ).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/api/embed",

@@ -37,6 +37,15 @@ ensure_certs() {
   fi
 }
 
+check_memory() {
+  local available
+  available=$(free -g | awk '/^Mem:/ {print $7}')
+  if [[ ! "$available" =~ ^[0-9]+$ ]] || (( available < 5 )); then
+    echo "Refusing to start: at least 5 GB available memory required (free -g reports ${available:-unknown} GB)." >&2
+    return 1
+  fi
+}
+
 case "$CMD" in
   certs)
     $PY -m fedrag.certgen --out ./certs --nodes "${2:-node1-maestro,node2-peer}" --ips "${3:-127.0.0.1}"
@@ -48,9 +57,31 @@ case "$CMD" in
     ;;
 
   up)
+    check_memory
     ensure_certs
     docker compose up -d --build
     $PY scripts/run_demo.py --action health
+    ;;
+
+  ollama-check)
+    docker compose exec -T node1-maestro python - <<'PYCODE'
+import json
+import time
+import urllib.request
+
+for node in (1, 2, 3):
+    url = f"http://ollama-node{node}:11434"
+    with urllib.request.urlopen(url + "/api/tags", timeout=30) as response:
+        print(f"node{node} models: {json.dumps(json.load(response)['models'])}", flush=True)
+    request = urllib.request.Request(url + "/api/embed", data=json.dumps({
+        "model": "embeddinggemma", "input": "Ollama health check", "options": {"num_gpu": 0},
+    }).encode(), headers={"Content-Type": "application/json"})
+    start = time.monotonic()
+    with urllib.request.urlopen(request, timeout=120) as response:
+        if not json.load(response).get("embeddings"):
+            raise RuntimeError(f"node{node} returned no embedding")
+    print(f"node{node} embedding latency: {time.monotonic() - start:.3f}s", flush=True)
+PYCODE
     ;;
 
   down)
@@ -97,6 +128,7 @@ case "$CMD" in
     ;;
 
   real-eval)
+    check_memory
     ensure_certs
     docker compose down -v >/dev/null 2>&1 || true
     FEDRAG_EMBEDDER=ollama docker compose up -d --build
@@ -104,6 +136,7 @@ case "$CMD" in
     ;;
 
   all)
+    check_memory
     $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer
     docker compose down -v >/dev/null 2>&1 || true
     docker compose up -d --build
@@ -112,7 +145,7 @@ case "$CMD" in
 
   *)
     echo "Unknown command: $CMD"
-    echo "Available commands: all | certs | build | up | down | ingest | train [rounds] [fedavg|ffa|dora] | query [question] | tamper | status | ledger | logs | unit"
+    echo "Available commands: all | certs | build | up | ollama-check | down | ingest | train [rounds] [fedavg|ffa|dora] | query [question] | tamper | status | ledger | logs | unit"
     exit 1
     ;;
 esac
