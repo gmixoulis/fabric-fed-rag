@@ -121,6 +121,15 @@ class NodeApp:
         metadata_holder = body.get("metadata_holder") or "node2-peer"
         doc_id = body["doc_id"]
 
+        digest = self.store.embedder.digest
+        if self.peer_url:
+            peer = mtls_request(self.ssl_client_ctx, f"{self.peer_url}/embedding-model", method="GET")
+            if peer["digest"] != digest:
+                raise ValueError("Embedding model digest differs between nodes")
+        documents = self.get_raft_ledger().get("ledger", {}).get("documents", {})
+        if any(doc.get("embedding_model_digest") != digest for doc in documents.values()):
+            raise ValueError("Embedding model digest differs from ledger")
+
         # 0. Pin full PDF to local Kubo IPFS node (Private Swarm) and get cryptographic CID
         ipfs_cid = self.ipfs.add_bytes(pdf_bytes, filename=f"{doc_id}.pdf", pin=True)
 
@@ -135,6 +144,7 @@ class NodeApp:
             ipfs_cid=ipfs_cid,
             training_pairs=body.get("training_pairs", []),
         )
+        manifest["embedding_model_digest"] = digest
         # 1. Commit document manifest + IPFS CID + SHA-256 hashes to Raft ledger
         raft_entry = self.propose_raft_tx("DOC_MANIFEST", manifest)
 
@@ -389,7 +399,9 @@ def build_handler(app: NodeApp):
 
         def do_GET(self) -> None:
             try:
-                if self.path == "/status":
+                if self.path == "/embedding-model":
+                    self._send(200, {"digest": app.store.embedder.digest})
+                elif self.path == "/status":
                     self._send(
                         200,
                         {
@@ -440,7 +452,7 @@ def select_embedder():
             emb.embed(["warmup test"])
             return emb
         except Exception as exc:
-            print(f"[node_service] Ollama unavailable ({exc}), falling back to HashEmbedder", flush=True)
+            raise RuntimeError(f"Ollama unavailable: {exc}") from exc
     return HashEmbedder()
 
 

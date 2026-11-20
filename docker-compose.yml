@@ -1,4 +1,74 @@
 services:
+  ollama-init:
+    image: ollama/ollama@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull embeddinggemma
+    environment:
+      - CUDA_VISIBLE_DEVICES=-1
+    volumes:
+      - ollama-models:/root/.ollama/models
+    networks:
+      - ollama-egress
+
+  ollama-node1:
+    image: ollama/ollama@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    volumes:
+      - ollama-models:/root/.ollama/models:ro
+    networks:
+      - ollama-internal
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ollama-node2:
+    image: ollama/ollama@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    volumes:
+      - ollama-models:/root/.ollama/models:ro
+    networks:
+      - ollama-internal
+
+  ollama-node3:
+    image: ollama/ollama@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    volumes:
+      - ollama-models:/root/.ollama/models:ro
+    networks:
+      - ollama-internal
+
   ipfs-node1:
     image: ipfs/kubo:latest
     container_name: ipfs-node1
@@ -36,7 +106,10 @@ services:
     container_name: node1-maestro
     hostname: node1-maestro
     depends_on:
-      - ipfs-node1
+      ipfs-node1:
+        condition: service_started
+      ollama-node1:
+        condition: service_healthy
     environment:
       - NODE_ID=node1-maestro
       - SHARD_ID=shard-1
@@ -47,8 +120,8 @@ services:
       - LORA_QUORUM=2
       - PEER_RAG_URL=https://node2-peer:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node1:5001
-      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
-      - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
+      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-ollama}
+      - FEDRAG_OLLAMA_URL=http://ollama-node1:11434
     volumes:
       - ./certs:/certs:ro
       - node1-data:/data
@@ -57,13 +130,17 @@ services:
       - "127.0.0.1:18443:8443"
     networks:
       - fabric-mtls-net
+      - ollama-internal
 
   node2-peer:
     build: .
     container_name: node2-peer
     hostname: node2-peer
     depends_on:
-      - ipfs-node2
+      ipfs-node2:
+        condition: service_started
+      ollama-node2:
+        condition: service_healthy
     environment:
       - NODE_ID=node2-peer
       - SHARD_ID=shard-2
@@ -74,8 +151,8 @@ services:
       - LORA_QUORUM=2
       - PEER_RAG_URL=https://node1-maestro:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node2:5001
-      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
-      - FEDRAG_OLLAMA_URL=http://host.docker.internal:11434
+      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-ollama}
+      - FEDRAG_OLLAMA_URL=http://ollama-node2:11434
     volumes:
       - ./certs:/certs:ro
       - node2-data:/data
@@ -84,8 +161,10 @@ services:
       - "127.0.0.1:28443:8443"
     networks:
       - fabric-mtls-net
+      - ollama-internal
 
 volumes:
+  ollama-models:
   node1-data:
   node2-data:
   ipfs1-data:
@@ -93,4 +172,8 @@ volumes:
 
 networks:
   fabric-mtls-net:
+    driver: bridge
+  ollama-internal:
+    internal: true
+  ollama-egress:
     driver: bridge
