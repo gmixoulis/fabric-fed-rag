@@ -12,7 +12,7 @@
 
 ### In Progress
 
-- None
+- Planned 2026-11-20: three nodes, one Ollama per node, data in thirds, Mac as third node later. See `docs/PLAN-3-NODES-OLLAMA.md` (start with WP1 and WP2).
 
 ### Decisions Made
 
