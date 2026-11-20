@@ -16,11 +16,10 @@ python3 -m fedrag.raft_ledger \
 
 exec python3 -m fedrag.node_service \
   --node-id "${NODE_ID}" \
-  --shard-id "${SHARD_ID}" \
   --listen-port 8443 \
   --data-dir "/data" \
   --raft-url "https://${NODE_ID}:7050" \
-  --peer-url "${PEER_RAG_URL}" \
+  --members "${FEDRAG_MEMBERS}" \
   --ca "/certs/ca.crt" \
   --cert "/certs/${NODE_ID}.crt" \
   --key "/certs/${NODE_ID}.key"

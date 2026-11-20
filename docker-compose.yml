@@ -101,6 +101,22 @@ services:
     networks:
       - fabric-mtls-net
 
+  ipfs-node3:
+    image: ipfs/kubo:latest
+    container_name: ipfs-node3
+    hostname: ipfs-node3
+    environment:
+      - LIBP2P_FORCE_PNET=1
+    volumes:
+      - ./certs:/certs:ro
+      - ./scripts/ipfs_init.sh:/container-init.d/001-private-swarm.sh:ro
+      - ipfs3-data:/data/ipfs
+    ports:
+      - "127.0.0.1:35001:5001"
+      - "127.0.0.1:34001:4001"
+    networks:
+      - fabric-mtls-net
+
   node1-maestro:
     build: .
     container_name: node1-maestro
@@ -112,13 +128,12 @@ services:
         condition: service_healthy
     environment:
       - NODE_ID=node1-maestro
-      - SHARD_ID=shard-1
       - RAFT_ROLE=leader
       - LEADER_URL=https://node1-maestro:7050
-      - RAFT_PEERS=https://node2-peer:7050
-      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050
+      - RAFT_PEERS=https://node2-peer:7050,https://node3-peer:7050
+      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050,node3-peer=https://node3-peer:7050
       - LORA_QUORUM=2
-      - PEER_RAG_URL=https://node2-peer:8443
+      - FEDRAG_MEMBERS=node1-maestro=https://node1-maestro:8443,node2-peer=https://node2-peer:8443,node3-peer=https://node3-peer:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node1:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-ollama}
       - FEDRAG_OLLAMA_URL=http://ollama-node1:11434
@@ -143,13 +158,12 @@ services:
         condition: service_healthy
     environment:
       - NODE_ID=node2-peer
-      - SHARD_ID=shard-2
       - RAFT_ROLE=follower
       - LEADER_URL=https://node1-maestro:7050
       - RAFT_PEERS=
-      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050
+      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050,node3-peer=https://node3-peer:7050
       - LORA_QUORUM=2
-      - PEER_RAG_URL=https://node1-maestro:8443
+      - FEDRAG_MEMBERS=node1-maestro=https://node1-maestro:8443,node2-peer=https://node2-peer:8443,node3-peer=https://node3-peer:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node2:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-ollama}
       - FEDRAG_OLLAMA_URL=http://ollama-node2:11434
@@ -163,12 +177,44 @@ services:
       - fabric-mtls-net
       - ollama-internal
 
+  node3-peer:
+    build: .
+    container_name: node3-peer
+    hostname: node3-peer
+    depends_on:
+      ipfs-node3:
+        condition: service_started
+      ollama-node3:
+        condition: service_healthy
+    environment:
+      - NODE_ID=node3-peer
+      - RAFT_ROLE=follower
+      - LEADER_URL=https://node1-maestro:7050
+      - RAFT_PEERS=
+      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050,node3-peer=https://node3-peer:7050
+      - LORA_QUORUM=2
+      - FEDRAG_MEMBERS=node1-maestro=https://node1-maestro:8443,node2-peer=https://node2-peer:8443,node3-peer=https://node3-peer:8443
+      - FEDRAG_IPFS_API_URL=http://ipfs-node3:5001
+      - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-ollama}
+      - FEDRAG_OLLAMA_URL=http://ollama-node3:11434
+    volumes:
+      - ./certs:/certs:ro
+      - node3-data:/data
+    ports:
+      - "127.0.0.1:37050:7050"
+      - "127.0.0.1:38443:8443"
+    networks:
+      - fabric-mtls-net
+      - ollama-internal
+
 volumes:
   ollama-models:
   node1-data:
   node2-data:
+  node3-data:
   ipfs1-data:
   ipfs2-data:
+  ipfs3-data:
 
 networks:
   fabric-mtls-net:

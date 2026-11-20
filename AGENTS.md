@@ -44,13 +44,13 @@ a GPU, or real client data.
 | `fedrag/raft_ledger.py` | Python Raft Leader/Follower replication over TLS 1.3 mTLS & hash-chained ledger |
 | `chaincode/validator.ts` | TypeScript chaincode validator for shard manifests, backups, and LoRA rounds |
 | `fedrag/certgen.py` | OpenSSL X.509 CA + node mTLS certificate generator (with SANs & RFC 5280 SKI/AKI) |
-| `fedrag/shard_store.py` | 50/50 PDF + vector sharding, metadata-only SHA-256 stubs, and backup checksum verifier |
+| `fedrag/shard_store.py` | N-way hash shard ring (thirds), metadata-only SHA-256 stubs, one ring backup replica and its restore |
 | `fedrag/embed.py` | `OllamaEmbedder` (`bge-m3` / `embeddinggemma`) + deterministic `HashEmbedder` + cosine `top_k` |
 | `fedrag/trainer.py` | Local shard LoRA trainer supporting both `fedavg` and `ffa` (*FFA-LoRA*, `arXiv:2403.12313`) |
-| `fedrag/fedavg.py` | LoRA key normalisation, shape checks, weighted FedAvg, and deterministic SHA-256 tensor hashing |
-| `fedrag/node_service.py` | Per-node mTLS daemon (`:8443`) for sharded RAG, backup attestation, and Federated LoRA rounds |
+| `fedrag/fedavg.py` | LoRA key normalisation, shape checks, weighted FedAvg, summed updates (server lr = participants), deterministic SHA-256 tensor hashing |
+| `fedrag/node_service.py` | Per-node mTLS daemon (`:8443`): member list, shard RAG, stubs, ring backup, restore, N-member Federated LoRA rounds |
 | `fedrag/hw_training/` | Full CUDA (`train-safe`) & Apple Silicon MPS QLoRA/bf16 trainers ported from `softone-rag` |
-| `scripts/run_demo.py` | Modular CLI & end-to-end verifier for the 2-Docker-node mTLS cluster |
+| `scripts/run_demo.py` | Modular CLI & end-to-end verifier for the 3-node mTLS cluster |
 | `run.sh` | Top-level CLI runner (`all`, `certs`, `build`, `up`, `down`, `ingest`, `train`, `query`, `tamper`, `status`, `ledger`, `unit`) |
 | `docs/` | `ARCHITECTURE.md`, `RESEARCH_PLAN.md`, `RESEARCH-LOG.md`, `EXPERIMENTS.md` |
 | `.trail/learnings/` | Persistent engineering learnings across sessions |
@@ -58,10 +58,11 @@ a GPU, or real client data.
 ## Useful commands
 
 ```bash
-./run.sh all                                      # full 2-Docker mTLS build, shard ingest, LoRA train, RAG query & audit
+./run.sh all                                      # full 3-node mTLS build, shard ingest, LoRA train, RAG query & audit
 ./run.sh train 3 fedavg                           # run 3 rounds of standard FedAvg-LoRA
+./run.sh train 3 fedavg summed                    # 3 rounds of summed updates (server lr = participants)
 ./run.sh train 3 ffa                              # run 3 rounds of FFA-LoRA (Freeze-A, arXiv:2403.12313)
-./run.sh query "Inventory goods SODTYPE in MTRL"  # scatter-gather RAG query across both shards
+./run.sh query "Inventory goods SODTYPE in MTRL"  # scatter-gather RAG query across all three shards
 ./run.sh unit                                     # run offline pytest suite
 ```
 

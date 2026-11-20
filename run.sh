@@ -1,18 +1,18 @@
 #!/bin/bash
-# FabricFedRAG Cluster & Experiment CLI Runner
+# FabricFedRAG Cluster & Experiment CLI Runner (three nodes, data in thirds)
 # Usage:
 #   ./run.sh all                      # Full flow: certs -> build -> up -> ingest -> train -> query -> tamper -> status
-#   ./run.sh certs                    # Generate Root CA & node X.509 mTLS certificates
-#   ./run.sh build                    # Build Docker images for node1-maestro and node2-peer
-#   ./run.sh up                       # Start the 2 connected mTLS Docker containers
+#   ./run.sh certs                    # Generate Root CA & node X.509 mTLS certificates (node1..3)
+#   ./run.sh build                    # Build Docker images for node1-maestro, node2-peer and node3-peer
+#   ./run.sh up                       # Start the 3 connected mTLS Docker containers (3 node + 3 ipfs + 3 ollama)
 #   ./run.sh down                     # Stop and remove containers + volumes
-#   ./run.sh ingest                   # Ingest 50/50 sharded PDFs, SHA-256 stubs, and cross-node backups
-#   ./run.sh train [rounds] [mode]    # Run Federated LoRA rounds (e.g. ./run.sh train 3 fedavg, ./run.sh train 3 ffa, ./run.sh train 3 dora)
-#   ./run.sh query "<question>"       # Run decentralized scatter-gather RAG query across both shards
+#   ./run.sh ingest                   # Ingest hash-sharded PDFs (a third per node), SHA-256 stubs, and ring backups
+#   ./run.sh train [rounds] [mode] [aggregation]  # e.g. ./run.sh train 3 fedavg summed / ./run.sh train 3 ffa / ./run.sh train 3 dora
+#   ./run.sh query "<question>"       # Run decentralized scatter-gather RAG query across all three shards
 #   ./run.sh tamper                   # Test Raft chaincode rejection of a tampered backup hash
-#   ./run.sh status                   # Show 50/50 shard counts, backup counts, and Raft block height
+#   ./run.sh status                   # Show three-shard counts, backup counts, and Raft block height
 #   ./run.sh ledger                   # Dump full Raft block ledger JSON
-#   ./run.sh logs                     # Tail logs from both Docker containers
+#   ./run.sh logs                     # Tail logs from all Docker containers
 #   ./run.sh unit                     # Run offline pytest and ruff checks
 
 set -e
@@ -95,7 +95,8 @@ PYCODE
   train)
     ROUNDS="${2:-3}"
     MODE="${3:-fedavg}"
-    $PY scripts/run_demo.py --action train --rounds "$ROUNDS" --lora-mode "$MODE"
+    AGGREGATION="${4:-average}"
+    $PY scripts/run_demo.py --action train --rounds "$ROUNDS" --lora-mode "$MODE" --aggregation "$AGGREGATION"
     ;;
 
   query)
@@ -145,7 +146,7 @@ PYCODE
 
   *)
     echo "Unknown command: $CMD"
-    echo "Available commands: all | certs | build | up | ollama-check | down | ingest | train [rounds] [fedavg|ffa|dora] | query [question] | tamper | status | ledger | logs | unit"
+    echo "Available commands: all | certs | build | up | ollama-check | down | ingest | train [rounds] [fedavg|ffa|dora] [average|summed] | query [question] | tamper | status | ledger | logs | unit | real-eval"
     exit 1
     ;;
 esac

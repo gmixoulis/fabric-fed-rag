@@ -2,7 +2,7 @@
  * TypeScript Chaincode Validator for Hyperledger Fabric 2.x / Raft Ledger
  *
  * Validates minimal on-chain commitments for:
- * 1. DOC_MANIFEST (50/50 PDF & chunk shard manifest with SHA-256 hashes)
+ * 1. DOC_MANIFEST (hash-sharded PDF & chunk manifest with SHA-256 hashes)
  * 2. BACKUP_CHECK (Cross-hardware backup replica SHA-256 verification)
  * 3. LORA_CLIENT_SUBMIT (Peer LoRA adapter SHA-256 & loss metrics)
  * 4. LORA_ROUND_FINALIZE (Maestro FedAvg / FFA-LoRA global adapter SHA-256 verification)

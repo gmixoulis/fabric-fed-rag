@@ -1,4 +1,4 @@
-"""Local LoRA Adapter Trainer on a Peer's 50% Document Shard (FedAvg-LoRA, FFA-LoRA, DoRA).
+"""Local LoRA Adapter Trainer on a Peer's Document Shard (FedAvg-LoRA, FFA-LoRA, DoRA).
 
 Supports three federated low-rank adaptation modes:
 1. ``fedavg``: Standard Federated LoRA (trains and averages both ``lora_A`` and ``lora_B``).
@@ -140,7 +140,7 @@ def train_local_lora_round(
     global_adapter_dir: Path | str | None = None,
     config: dict | None = None,
 ) -> dict:
-    """Train one Federated LoRA round on this peer's local 50% shard examples."""
+    """Train one Federated LoRA round on this peer's local shard examples."""
     if not examples:
         raise ValueError(f"Node {node_id} has no training examples in shard {shard_id}")
 

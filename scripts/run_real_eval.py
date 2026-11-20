@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Real-Case End-to-End Evaluation on the 4-Container mTLS Raft + Private Kubo IPFS + Sharded RAG Cluster.
+"""Real-Case End-to-End Evaluation on the 6-container mTLS Raft + Private Kubo IPFS + Sharded RAG Cluster.
+
+Documents are routed to their hash owner (`fedrag.shard_store.ShardRing`), so the corpus
+spreads over three shards; the scatter-gather mode queries all reachable nodes.
 
 Uses:
-- Real Ollama embeddings (`embeddinggemma:latest`, 768-d) inside the Docker containers
+- Real Ollama embeddings (`embeddinggemma:latest`, 768-d), one Ollama container per node
 - Real Ollama LLM (`qwen3.5:4b`) for SQL generation over the SoftOne ERP schema
-- Real Private Kubo IPFS swarm (`ipfs-node1` & `ipfs-node2` with `LIBP2P_FORCE_PNET=1`)
+- Real Private Kubo IPFS swarm (`ipfs-node1..3` with `LIBP2P_FORCE_PNET=1`)
 - Real SoftOne datasets (`eval/taught_facts.jsonl`, `eval/softone_train_seed.jsonl`, `eval/softone_holdout.jsonl`)
 """
 
@@ -25,6 +28,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from fedrag.node_service import make_client_ssl_context, mtls_request  # noqa: E402
+from fedrag.shard_store import ShardRing  # noqa: E402
 from scripts.run_demo import connect_kubo_private_swarm, make_minimal_pdf, wait_for_nodes  # noqa: E402
 
 # Same default snapshot as fedrag/hw_training/evaluate_adapter.py.
@@ -419,22 +423,26 @@ def main() -> None:
         str(certs / "node1-maestro.crt"),
         str(certs / "node1-maestro.key"),
     )
-    node1_rag = "https://localhost:18443"
-    node2_rag = "https://localhost:28443"
-    node1_raft = "https://localhost:17050"
-    node2_raft = "https://localhost:27050"
+    node_ids = ["node1-maestro", "node2-peer", "node3-peer"]
+    rag_urls = {
+        "node1-maestro": "https://localhost:18443",
+        "node2-peer": "https://localhost:28443",
+        "node3-peer": "https://localhost:38443",
+    }
+    raft_urls = {
+        "node1-maestro": "https://localhost:17050",
+        "node2-peer": "https://localhost:27050",
+        "node3-peer": "https://localhost:37050",
+    }
+    node1_rag = rag_urls["node1-maestro"]
+    ring = ShardRing(node_ids)
 
-    print("=== 1. Connecting to Live 4-Container Cluster (Raft mTLS + Private Kubo IPFS + Ollama) ===")
+    print("=== 1. Connecting to Live 6-Container Cluster (Raft mTLS + Private Kubo IPFS + Ollama) ===")
     wait_for_nodes(
         ssl_ctx,
-        [
-            f"{node1_raft}/health",
-            f"{node2_raft}/health",
-            f"{node1_rag}/status",
-            f"{node2_rag}/status",
-        ],
+        [f"{url}/health" for url in raft_urls.values()] + [f"{url}/status" for url in rag_urls.values()],
     )
-    connect_kubo_private_swarm("http://localhost:15001", "http://localhost:25001")
+    connect_kubo_private_swarm("http://localhost:15001", "http://localhost:25001", "http://localhost:35001")
 
     facts = [
         json.loads(line)
@@ -454,7 +462,7 @@ def main() -> None:
     if args.limit is not None:
         holdout = holdout[: args.limit]
 
-    # Split the 15 taught facts and 16 training examples 50/50 across Shard 1 (TRDR + MTRL) and Shard 2 (FINDOC)
+    # Four documents, one per ERP area; the hash ring decides which node owns each of them.
     trdr_facts = [f["text"] for f in facts if f["table_name"] == "TRDR"]
     mtrl_facts = [f["text"] for f in facts if f["table_name"] == "MTRL"]
     findoc_sosource_facts = [
@@ -467,7 +475,7 @@ def main() -> None:
     shard1_train = [{"prompt": r["question"], "target": r["sql"]} for r in train_seed[:8]]
     shard2_train = [{"prompt": r["question"], "target": r["sql"]} for r in train_seed[8:]]
 
-    shard1_docs = [
+    docs = [
         {
             "doc_id": "real-pdf-trdr",
             "title": "SoftOne ERP Trader Master (TRDR) Verified Code Specification",
@@ -482,9 +490,6 @@ def main() -> None:
             "chunks": mtrl_facts,
             "training_pairs": shard1_train[4:],
         },
-    ]
-
-    shard2_docs = [
         {
             "doc_id": "real-pdf-findoc-series",
             "title": "SoftOne ERP Financial Documents (FINDOC SOSOURCE & ISCANCEL) Verified Specification",
@@ -501,42 +506,28 @@ def main() -> None:
         },
     ]
 
-    print("\n=== 2. Ingesting Real SoftOne Domain PDFs (50/50 Split) into Kubo IPFS + Ollama Embeddings ===")
+    print("\n=== 2. Ingesting Real SoftOne Domain PDFs (hash shards) into Kubo IPFS + Ollama Embeddings ===")
     ingested_manifests = []
-    for doc in shard1_docs:
-        pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
+    for doc in docs:
+        assignment = ring.assignment(doc["doc_id"])
+        pdf_bytes = make_minimal_pdf(
+            doc["title"],
+            doc["chunks"],
+            doc_id=doc["doc_id"],
+            shard_owner=assignment["owner"],
+            metadata_holder=assignment["backup"],
+        )
         res = mtls_request(
             ssl_ctx,
-            f"{node1_rag}/shard/ingest-full",
+            f"{rag_urls[assignment['owner']]}/shard/ingest-full",
             method="POST",
-            payload={
-                **doc,
-                "metadata_holder": "node2-peer",
-                "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-            },
+            payload={**doc, "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii")},
         )
         ingested_manifests.append(res["manifest"])
         print(
-            f"   [Shard 1 -> node1-maestro] {doc['doc_id']} | CID={res['manifest']['ipfs_cid']} | "
-            f"chunks={len(doc['chunks'])} | Raft block #{res['raft_block_index']}"
-        )
-
-    for doc in shard2_docs:
-        pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
-        res = mtls_request(
-            ssl_ctx,
-            f"{node2_rag}/shard/ingest-full",
-            method="POST",
-            payload={
-                **doc,
-                "metadata_holder": "node1-maestro",
-                "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-            },
-        )
-        ingested_manifests.append(res["manifest"])
-        print(
-            f"   [Shard 2 -> node2-peer]    {doc['doc_id']} | CID={res['manifest']['ipfs_cid']} | "
-            f"chunks={len(doc['chunks'])} | Raft block #{res['raft_block_index']}"
+            f"   [{assignment['shard_id']} -> {assignment['owner']}] {doc['doc_id']} | "
+            f"CID={res['manifest']['ipfs_cid']} | chunks={len(doc['chunks'])} | "
+            f"Raft block #{res['raft_block_index']}"
         )
 
     print(f"\n=== 3. Evaluating Real Held-Out Set ({len(holdout)} Cases, EN+EL) with qwen3.5:4b & embeddinggemma ===")
@@ -549,10 +540,11 @@ def main() -> None:
                    f"`{args.snapshot}`; scored on the built-in `build_eval_sqlite()` rows.")
         print(f"WARNING: snapshot not found at {args.snapshot}; falling back to build_eval_sqlite() "
               "— toy database, numbers not comparable")
+    # Mode keys are kept for results/real_eval_raw.json and the Excel exporter.
     modes = [
         ("no_rag", "0% PDFs (No RAG / Base qwen3.5:4b)"),
-        ("single_shard_node1", "50% PDFs (Node 1 Shard 1 Only)"),
-        ("decentralized_50_50_rag", "100% Shards (Decentralized 50/50 Scatter-Gather mTLS + IPFS)"),
+        ("single_shard_node1", "One shard only (node1-maestro's hash shard)"),
+        ("decentralized_50_50_rag", "All shards (decentralized scatter-gather mTLS + IPFS)"),
     ]
     eval_summary: dict[str, dict] = {}
 
@@ -590,30 +582,32 @@ def main() -> None:
                 payload={"round_id": r, "lora_mode": lora_mode},
             )
             lora_ablation[lora_mode].append(res)
-            c1, c2 = res["clients"][0], res["clients"][1]
+            per_client = " | ".join(
+                f"{c['node_id']}: {c['first_loss']:.4f}->{c['last_loss']:.4f} ({c['num_examples']} ex)"
+                for c in res["clients"]
+            )
             print(
-                f"   [{lora_mode.upper()} Round {r}] "
-                f"Shard1: {c1['first_loss']:.4f}->{c1['last_loss']:.4f} ({c1['num_examples']} ex) | "
-                f"Shard2: {c2['first_loss']:.4f}->{c2['last_loss']:.4f} ({c2['num_examples']} ex) | "
-                f"Global Loss={res['weighted_loss']:.4f} | IPFS CID={res['global_adapter_cid']}"
+                f"   [{lora_mode.upper()} Round {r}] {per_client} | "
+                f"Global Loss={res['weighted_loss']:.4f} | "
+                f"participants={sorted(res['participants'])} | IPFS CID={res['global_adapter_cid']}"
             )
 
-    s1 = mtls_request(ssl_ctx, f"{node1_rag}/status")
-    s2 = mtls_request(ssl_ctx, f"{node2_rag}/status")
+    statuses = {node_id: mtls_request(ssl_ctx, f"{rag_urls[node_id]}/status") for node_id in node_ids}
+    s1, s2, s3 = statuses["node1-maestro"], statuses["node2-peer"], statuses["node3-peer"]
 
     # Write full markdown report to docs/REAL_EVAL_RESULTS.md
     report_lines = [
         "# Real-Case Experimental Results (MacBook Air M4 — 4-Container mTLS + Kubo IPFS + Ollama)",
         "",
-        "Measured end-to-end on the live 4-container Docker cluster "
-        "(`node1-maestro`, `node2-peer`, `ipfs-node1`, `ipfs-node2`)",
+        "Measured end-to-end on the live Docker cluster "
+        "(`node1-maestro`, `node2-peer`, `node3-peer`, `ipfs-node1..3`, `ollama-node1..3`)",
         "connected to host Ollama (`embeddinggemma:latest` 768-d semantic embeddings + `qwen3.5:4b` SQL generator).",
         "",
         db_note,
         "",
-        "## 1. 50/50 Sharded PDF Corpus & Private Kubo IPFS CIDs (`LIBP2P_FORCE_PNET=1`)",
+        "## 1. Hash-Sharded PDF Corpus & Private Kubo IPFS CIDs (`LIBP2P_FORCE_PNET=1`)",
         "",
-        "| Document ID | Active Shard Owner | Metadata + Backup Peer | Kubo IPFS CIDv1 | PDF SHA-256 | Chunks |",
+        "| Document ID | Shard Owner | Metadata + Backup Peer | Kubo IPFS CIDv1 | PDF SHA-256 | Chunks |",
         "|---|---|---|---|---|---|",
     ]
     for m in ingested_manifests:
@@ -626,7 +620,7 @@ def main() -> None:
 
     report_lines += [
         "",
-        "## 3. Federated LoRA Training Ablation (`FedAvg-LoRA` vs. `FFA-LoRA`, 16 Seed Examples Split 8/8)",
+        "## 3. Federated LoRA Training Ablation (`FedAvg-LoRA` vs. `FFA-LoRA`, seed pairs per hash shard)",
         "",
         "| Round | `FedAvg-LoRA` Loss | `FedAvg-LoRA` Global CID | `FFA-LoRA` Loss | `FFA-LoRA` Global CID |",
         "|---|---|---|---|---|",
@@ -639,17 +633,14 @@ def main() -> None:
             f"`{ff['weighted_loss']:.4f}` | `{ff['global_adapter_cid']}` |"
         )
 
-    h1_tip = s1["raft"]["ledger"]["last_hash"][:20]
-    h2_tip = s2["raft"]["ledger"]["last_hash"][:20]
-    report_lines += [
-        "",
-        "## 4. Final Cluster & Ledger State",
-        "",
-        f"- **`node1-maestro`:** Raft Height = `{s1['raft']['ledger']['height']}`, "
-        f"Tip Hash = `{h1_tip}...`, Kubo Pins = `{len(s1['ipfs']['pins'])}`",
-        f"- **`node2-peer`:** Raft Height = `{s2['raft']['ledger']['height']}`, "
-        f"Tip Hash = `{h2_tip}...`, Kubo Pins = `{len(s2['ipfs']['pins'])}`",
-    ]
+    report_lines += ["", "## 4. Final Cluster & Ledger State", ""]
+    for node_id, status in statuses.items():
+        report_lines.append(
+            f"- **`{node_id}`:** shard `{status['rag_store']['shard']['shard_id']}`, "
+            f"Raft Height = `{status['raft']['ledger']['height']}`, "
+            f"Tip Hash = `{status['raft']['ledger']['last_hash'][:20]}...`, "
+            f"Kubo Pins = `{len(status['ipfs']['pins'])}`"
+        )
 
     report_path = _ROOT / "docs/REAL_EVAL_RESULTS.md"
     report_path.write_text("\n".join(report_lines) + "\n")
@@ -666,6 +657,7 @@ def main() -> None:
                 "lora_ablation": lora_ablation,
                 "node1_status": s1,
                 "node2_status": s2,
+                "node3_status": s3,
             },
             indent=2,
         )

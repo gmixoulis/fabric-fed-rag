@@ -1,7 +1,7 @@
 [project]
 name = "fabric-fed-rag"
 version = "0.1.0"
-description = "Decentralized 50/50 Sharded RAG & Federated LoRA Training over Python Raft + mTLS"
+description = "Decentralized hash-sharded RAG & Federated LoRA Training over Python Raft + mTLS"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26.0",

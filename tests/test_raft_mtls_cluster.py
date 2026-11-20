@@ -1,4 +1,8 @@
-"""In-process 2-node TLS 1.3 mTLS cluster test covering Raft replication, 50/50 sharded RAG, and Federated LoRA."""
+"""In-process 2-node TLS 1.3 mTLS cluster test: Raft replication, two-way sharding, Federated LoRA.
+
+This is the N = 2 regression for the N-way shard ring: two members must still split the
+corpus in half, each backing up the other's shard, exactly as before WP3.
+"""
 
 from __future__ import annotations
 
@@ -70,13 +74,14 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
     raft1.leader_url = f"https://127.0.0.1:{raft1_port}"
     raft2.leader_url = f"https://127.0.0.1:{raft1_port}"
 
-    # 3. Start NodeApp RAG + Trainer servers for both nodes
+    # 3. Start NodeApp RAG + Trainer servers for both nodes. The member list defines the
+    # shard ring; the URLs are published once both ephemeral ports are known.
+    member_ids = {"node1-maestro": "", "node2-peer": ""}
     app2 = NodeApp(
         node_id="node2-peer",
-        shard_id="shard-2",
         data_dir=tmp_path / "node2",
         raft_url=f"https://127.0.0.1:{raft2_port}",
-        peer_url="",
+        members=member_ids,
         ca_file=ca_file,
         cert_file=n2_cert,
         key_file=n2_key,
@@ -86,17 +91,25 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
 
     app1 = NodeApp(
         node_id="node1-maestro",
-        shard_id="shard-1",
         data_dir=tmp_path / "node1",
         raft_url=f"https://127.0.0.1:{raft1_port}",
-        peer_url=f"https://127.0.0.1:{app2_port}",
+        members=member_ids,
         ca_file=ca_file,
         cert_file=n1_cert,
         key_file=n1_key,
         embedder=HashEmbedder(),
     )
     app1_srv, app1_port = _start_tls_server(build_handler(app1), n1_server_ctx)
-    app2.peer_url = f"https://127.0.0.1:{app1_port}"
+
+    urls = {
+        "node1-maestro": f"https://127.0.0.1:{app1_port}",
+        "node2-peer": f"https://127.0.0.1:{app2_port}",
+    }
+    app1.configure_member_urls(urls)
+    app2.configure_member_urls(urls)
+    assert app1.shard_id == "shard-1" and app2.shard_id == "shard-2"
+    assert app1.store.backup_target() == "node2-peer"
+    assert app2.store.backup_target() == "node1-maestro"
 
     try:
         # Verify mTLS health and client certificate CN
@@ -110,9 +123,8 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
             f"https://127.0.0.1:{app1_port}/shard/ingest-full",
             method="POST",
             payload={
-                "doc_id": "doc-s1",
+                "doc_id": "doc-a",
                 "title": "Customer Spec",
-                "metadata_holder": "node2-peer",
                 "pdf_base64": base64.b64encode(pdf1).decode("ascii"),
                 "chunks": ["Customer records use SODTYPE 13 in TRDR."],
                 "page_count": 1,
@@ -124,6 +136,8 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
                 ],
             },
         )
+        assert res1["shard_assignment"]["owner"] == "node1-maestro"
+        assert res1["shard_assignment"]["backup"] == "node2-peer"
         assert res1["peer_metadata_stub"]["is_metadata_only"] is True
         assert res1["peer_backup_attestation"]["verified"] is True
 
@@ -134,9 +148,8 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
             f"https://127.0.0.1:{app2_port}/shard/ingest-full",
             method="POST",
             payload={
-                "doc_id": "doc-s2",
+                "doc_id": "doc-d",
                 "title": "Purchase Spec",
-                "metadata_holder": "node1-maestro",
                 "pdf_base64": base64.b64encode(pdf2).decode("ascii"),
                 "chunks": ["Supplier purchase invoices use SOSOURCE 1251 in FINDOC."],
                 "page_count": 1,
@@ -148,6 +161,8 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
                 ],
             },
         )
+        assert res2["shard_assignment"]["owner"] == "node2-peer"
+        assert res2["shard_assignment"]["backup"] == "node1-maestro"
         assert res2["peer_metadata_stub"]["is_metadata_only"] is True
         assert res2["peer_backup_attestation"]["verified"] is True
 
@@ -173,7 +188,9 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
             method="POST",
             payload={"query": "Supplier purchase invoices SOSOURCE 1251", "k": 2},
         )
-        assert q_res["top_k"][0]["doc_id"] == "doc-s2"
+        assert q_res["complete"] is True
+        assert q_res["missing_shards"] == []
+        assert q_res["top_k"][0]["doc_id"] == "doc-d"
         assert q_res["top_k"][0]["node_id"] == "node2-peer"
         assert q_res["top_k"][0]["ledger_hash_verified"] is True
 
@@ -186,7 +203,7 @@ def test_two_node_mtls_raft_and_federated_rag_cluster(tmp_path):
                 payload={
                     "tx_type": "BACKUP_CHECK",
                     "payload": {
-                        "doc_id": "doc-s1",
+                        "doc_id": "doc-a",
                         "source_node": "node1-maestro",
                         "backup_node": "node2-peer",
                         "computed_sha256": "0" * 64,

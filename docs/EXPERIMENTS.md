@@ -188,6 +188,31 @@ ephemeral localhost TLS 1.3 mTLS sockets, temporary ledger files.
 Not measured here: Docker topology, per-node Ollama, three-way shards, federated
 training over three nodes (WP2-WP4).
 
+## E9. Data in thirds, ring backups, three-peer retrieval and rounds, offline (WP3, 2026-11-20)
+
+No Docker, no GPU, no external network: temp directories, the deterministic `HashEmbedder`,
+temporary SQLite and ledger files, ephemeral localhost TLS 1.3 mTLS sockets. Corpus is nine
+synthetic documents (`doc-121`…`doc-129`), no client data.
+
+| Check | Result |
+|---|---|
+| Assignment deterministic for N = 2 and N = 3 | pass: same index from a fresh ring and from a reversed member list; a different salt gives a different split |
+| Balanced within one document (nine docs) | pass: N = 3 → 3/3/3, N = 2 → 5/4 |
+| Exactly one owner and one backup per document, backup ≠ owner | pass, for N = 2 and N = 3; ring order 1→2, 2→3, 3→1 |
+| One node lost, metadata still complete | pass: each survivor answers all nine `doc_id`s (3 full + 6 stubs) |
+| Backups restore the lost shard | pass: `node2-peer` rebuilt from `node3-peer` replicas; `pdf_sha256`, `chunks_sha256`, `content_sha256` unchanged; a tampered replica is refused |
+| Three-peer scatter-gather when all alive | pass: top-3 `(doc_id, chunk_id, score)` identical to a single index holding the whole corpus |
+| One peer down or hung (0.5 s timeout) | pass: query still answers, `complete=false`, `missing_nodes=[node3-peer]`, `missing_shards=[shard-3]` |
+| Round with three members | pass: participants = all three, `server_lr=1.0`, loss falls round over round |
+| Summed updates with three members | pass: `server_lr=3.0`, finalize recorded with `aggregation=summed` |
+| Round with two of three | pass: participants = node1 + node2, `unavailable_members=[node3-peer]`, finalized at the 2-of-3 ledger quorum |
+| Round with one of three | pass: refused (`needs 2`), no `LORA_ROUND_FINALIZE` on the ledger |
+| N = 2 unchanged | pass: two-node mTLS cluster test now driven by the member list, same assertions |
+
+Docker topology, per-node Ollama under the 2 GB limits, and retrieval recall against the
+synthetic ERP replica (WP4 numbers) were **not** measured here: the host had under 4 GB of
+free memory, so no container was started.
+
 ## Threats to validity
 
 - **Single runs.** Speeds are one `llama-bench` run each; no variance is reported.

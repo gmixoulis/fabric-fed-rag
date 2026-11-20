@@ -1,6 +1,6 @@
 """PDF Builder, Metadata Hash Stamper, Internal Hash Validator, and PDF Embedder.
 
-Implements the two PDF representations required by the 50/50 sharded RAG architecture:
+Implements the two PDF representations required by the sharded RAG architecture:
 1. **Full Shard PDF (`is_metadata_only=false`)**:
    - Contains the full document text chunks across pages PLUS an embedded PDF `/Info`
      metadata dictionary carrying `doc_id`, `shard_owner`, `metadata_holder`,
@@ -10,7 +10,7 @@ Implements the two PDF representations required by the 50/50 sharded RAG archite
      recorded inside the PDF `/Info` metadata, and embeds every chunk with `OllamaEmbedder`
      (`bge-m3` / `embeddinggemma`) or `HashEmbedder`.
 2. **Metadata-Only Stub PDF (`is_metadata_only=true`)**:
-   - Stored on the peer node that holds the *other* 50% shard (`pdfs/<doc_id>.stub.pdf`).
+   - Stored on every member that does not own the document (`pdfs/<doc_id>.stub.pdf`).
    - Contains only the PDF `/Info` metadata dictionary and header stub with the verified
      `pdf_sha256`, `content_sha256`, `chunks_sha256`, and `ipfs_cid` of the full PDF, plus
      its own `stub_pdf_sha256` checksum.
@@ -115,7 +115,7 @@ def build_full_pdf_with_metadata(
 
 
 def build_metadata_stub_pdf(manifest: dict) -> tuple[bytes, dict]:
-    """Create a lightweight Metadata-Only Stub PDF containing only the verified hashes for the other 50% shard."""
+    """Create a lightweight Metadata-Only Stub PDF carrying only the verified hashes of another shard."""
     doc_id = manifest["doc_id"]
     title = manifest["title"]
     shard_owner = manifest["shard_owner"]

@@ -88,6 +88,61 @@ def average_adapters(parts: list[tuple[dict[str, np.ndarray], float]]) -> dict[s
     return averaged
 
 
+AGGREGATION_MODES = ("average", "summed")
+SERVER_LR_MAX = 16.0
+
+
+def validate_server_lr(value: object) -> float:
+    """The merge scale: 0 < server_lr <= 16, with 1.0 meaning plain FedAvg."""
+    try:
+        server_lr = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError(f"server_lr must be a number, got {value!r}") from None
+    if not 0.0 < server_lr <= SERVER_LR_MAX:
+        raise ValueError(f"server_lr must be in (0, {SERVER_LR_MAX}], got {server_lr}")
+    return server_lr
+
+
+def server_lr_for(aggregation: str, num_participants: int) -> float:
+    """Server learning rate for one aggregation mode.
+
+    ``average`` is plain FedAvg (server_lr = 1). ``summed`` sums the per-node updates
+    instead of averaging them: with disjoint shards that is a server learning rate equal
+    to the number of participants (softone-rag E-2026-11-18).
+    """
+    mode = str(aggregation).lower()
+    if mode not in AGGREGATION_MODES:
+        raise ValueError(f"unknown aggregation {aggregation!r}; use one of {list(AGGREGATION_MODES)}")
+    if num_participants < 1:
+        raise ValueError("aggregation needs at least one participant")
+    return 1.0 if mode == "average" else float(num_participants)
+
+
+def aggregate_adapters(
+    parts: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    previous: dict[str, np.ndarray] | None = None,
+    server_lr: float = 1.0,
+) -> dict[str, np.ndarray]:
+    """FedAvg, then one step of ``previous + server_lr * (weighted mean - previous)``.
+
+    ``server_lr == 1`` returns the plain weighted mean untouched, so plain averaging is
+    bit-identical to :func:`average_adapters`. ``server_lr == N`` over N disjoint shards
+    sums their updates instead of halving them.
+    """
+    server_lr = validate_server_lr(server_lr)
+    averaged = average_adapters(parts)
+    if server_lr == 1.0:
+        return averaged
+    if previous is None:
+        raise ValueError(
+            f"server_lr {server_lr} needs the adapter the participants started this round from"
+        )
+    previous = normalise_state(previous)
+    keys = assert_same_shapes([averaged, previous])
+    return {key: previous[key] + server_lr * (averaged[key] - previous[key]) for key in keys}
+
+
 def adapter_sha256(state: dict[str, np.ndarray]) -> str:
     """Compute a deterministic SHA-256 hash over sorted LoRA tensor names, shapes, and float32 bytes."""
     norm = normalise_state(state)

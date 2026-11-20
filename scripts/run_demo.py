@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Modular CLI & End-to-End Demo Runner for the 2-Docker-Node mTLS Raft + Sharded RAG + Federated LoRA cluster."""
+"""Modular CLI & End-to-End Demo Runner for the 3-node mTLS Raft + Sharded RAG + Federated LoRA cluster.
+
+Documents are routed to their hash owner (`fedrag.shard_store.ShardRing`), so the same
+corpus works unchanged with two or three nodes.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ if str(_ROOT) not in sys.path:
 from fedrag.ipfs_client import KuboIPFSClient  # noqa: E402
 from fedrag.node_service import make_client_ssl_context, mtls_request  # noqa: E402
 from fedrag.pdf_embedder import build_full_pdf_with_metadata  # noqa: E402
+from fedrag.shard_store import ShardRing  # noqa: E402
 
 
 def make_minimal_pdf(
@@ -40,10 +45,12 @@ def make_minimal_pdf(
     return pdf_bytes
 
 
-CORPUS_SHARD_1 = [
+# Nine synthetic documents: three per shard at three nodes (4/5 at two nodes, see
+# `docs/EXPERIMENTS.md` E9). No client data, no real snapshot rows.
+CORPUS = [
     {
-        "doc_id": "doc-101",
-        "title": "SoftOne Customer & Supplier Type Codes (Shard 1)",
+        "doc_id": "doc-121",
+        "title": "SoftOne Trader Type Codes (TRDR)",
         "page_count": 3,
         "chunks": [
             "In the TRDR table, SODTYPE = 13 identifies customer records across all fiscal periods.",
@@ -61,8 +68,8 @@ CORPUS_SHARD_1 = [
         ],
     },
     {
-        "doc_id": "doc-102",
-        "title": "Sales Invoice & Cancellation Rules (Shard 1)",
+        "doc_id": "doc-122",
+        "title": "Sales Invoice & Cancellation Rules (FINDOC)",
         "page_count": 4,
         "chunks": [
             "Sales documents in FINDOC use SOSOURCE = 1351 and exclude cancelled rows with ISCANCEL = 0.",
@@ -80,8 +87,8 @@ CORPUS_SHARD_1 = [
         ],
     },
     {
-        "doc_id": "doc-103",
-        "title": "Inventory & Material Master Specification (Shard 1)",
+        "doc_id": "doc-123",
+        "title": "Inventory & Material Master Specification (MTRL)",
         "page_count": 2,
         "chunks": [
             "Inventory goods in MTRL have SODTYPE = 51 while services use SODTYPE = 52.",
@@ -98,12 +105,9 @@ CORPUS_SHARD_1 = [
             },
         ],
     },
-]
-
-CORPUS_SHARD_2 = [
     {
-        "doc_id": "doc-201",
-        "title": "Purchase Orders & Supplier Ledger (Shard 2)",
+        "doc_id": "doc-124",
+        "title": "Purchase Orders & Supplier Ledger (FINDOC)",
         "page_count": 5,
         "chunks": [
             "Purchase invoices in FINDOC are recorded with SOSOURCE = 1251 and linked to TRDR via TRDR = TRDR.TRDR.",
@@ -121,8 +125,8 @@ CORPUS_SHARD_2 = [
         ],
     },
     {
-        "doc_id": "doc-202",
-        "title": "AADE myDATA e-Invoicing Transmission Series (Shard 2)",
+        "doc_id": "doc-125",
+        "title": "AADE myDATA e-Invoicing Transmission Series",
         "page_count": 3,
         "chunks": [
             "Transmitted AADE myDATA invoice series in FINDOC use SOSOURCE = 1361 for certified B2B issuance.",
@@ -143,8 +147,8 @@ CORPUS_SHARD_2 = [
         ],
     },
     {
-        "doc_id": "doc-203",
-        "title": "Multi-Branch Payment & Cash Collections (Shard 2)",
+        "doc_id": "doc-126",
+        "title": "Multi-Branch Payment & Cash Collections",
         "page_count": 2,
         "chunks": [
             "Customer cash collection receipts in FINDOC use SOSOURCE = 1381 across company branches.",
@@ -161,10 +165,79 @@ CORPUS_SHARD_2 = [
             },
         ],
     },
+    {
+        "doc_id": "doc-127",
+        "title": "Warehouse Stock Balances (MTRLINES)",
+        "page_count": 3,
+        "chunks": [
+            "Warehouse stock valuation sums MTRLINES.LINEVAL grouped by FINDOC.BRANCH.",
+            "Quantities per line are stored in MTRLINES.QTY1 and priced in MTRLINES.PRICE.",
+        ],
+        "training_pairs": [
+            {
+                "prompt": "What is the total stock value per branch?",
+                "target": "SELECT BRANCH, SUM(LINEVAL) FROM MTRLINES GROUP BY BRANCH;",
+            },
+            {
+                "prompt": "How many stock lines have quantity above ten?",
+                "target": "SELECT COUNT(*) FROM MTRLINES WHERE QTY1 > 10;",
+            },
+        ],
+    },
+    {
+        "doc_id": "doc-128",
+        "title": "VAT Totals & Document Sums (FINDOC)",
+        "page_count": 2,
+        "chunks": [
+            "Document VAT totals are stored in FINDOC.VATAMNT and gross totals in FINDOC.SUMAMNT.",
+            "SUMAMNT equals NETAMNT plus VATAMNT for every non-cancelled document.",
+        ],
+        "training_pairs": [
+            {
+                "prompt": "What is the total VAT amount of all sales invoices?",
+                "target": "SELECT SUM(VATAMNT) FROM FINDOC WHERE SOSOURCE = 1351 AND ISCANCEL = 0;",
+            },
+            {
+                "prompt": "Which documents have a gross total above one thousand?",
+                "target": "SELECT FINDOC FROM FINDOC WHERE SUMAMNT > 1000;",
+            },
+        ],
+    },
+    {
+        "doc_id": "doc-129",
+        "title": "Credit Notes & Returns (FINDOC SODTYPE)",
+        "page_count": 2,
+        "chunks": [
+            "Credit notes carry FINDOC.SODTYPE = 5 and reference the original invoice in FINCODE.",
+            "Returned goods are recorded as negative NETAMNT lines in MTRLINES.",
+        ],
+        "training_pairs": [
+            {
+                "prompt": "How many credit notes exist?",
+                "target": "SELECT COUNT(*) FROM FINDOC WHERE SODTYPE = 5;",
+            },
+            {
+                "prompt": "What is the total value of returned goods?",
+                "target": "SELECT SUM(LINEVAL) FROM MTRLINES WHERE LINEVAL < 0;",
+            },
+        ],
+    },
 ]
 
 
-def wait_for_nodes(ssl_ctx, urls: list[str], timeout_s: float = 30.0) -> None:
+def shard_ring(args) -> ShardRing:
+    return ShardRing([args.node1_id, args.node2_id, args.node3_id])
+
+
+def rag_urls(args) -> dict[str, str]:
+    return {
+        args.node1_id: args.node1_rag,
+        args.node2_id: args.node2_rag,
+        args.node3_id: args.node3_rag,
+    }
+
+
+def wait_for_nodes(ssl_ctx, urls: list[str], timeout_s: float = 45.0) -> None:
     deadline = time.time() + timeout_s
     for url in urls:
         while True:
@@ -177,20 +250,26 @@ def wait_for_nodes(ssl_ctx, urls: list[str], timeout_s: float = 30.0) -> None:
                 time.sleep(0.5)
 
 
-def connect_kubo_private_swarm(ipfs1_url: str, ipfs2_url: str, timeout_s: float = 30.0) -> None:
-    c1 = KuboIPFSClient(ipfs1_url, timeout=5.0)
-    c2 = KuboIPFSClient(ipfs2_url, timeout=5.0)
+def connect_kubo_private_swarm(ipfs1_url: str, ipfs2_url: str, ipfs3_url: str = "", timeout_s: float = 30.0) -> None:
+    clients = [KuboIPFSClient(ipfs1_url, timeout=5.0), KuboIPFSClient(ipfs2_url, timeout=5.0)]
+    if ipfs3_url:
+        clients.append(KuboIPFSClient(ipfs3_url, timeout=5.0))
+    peer_names = [f"ipfs-node{index + 1}" for index in range(len(clients))]
     deadline = time.time() + timeout_s
     while True:
         try:
-            id1 = c1.id_info()
-            id2 = c2.id_info()
-            peer2_id = id2["ID"]
-            c1.swarm_connect(f"/dns4/ipfs-node2/tcp/4001/p2p/{peer2_id}")
-            peers = c1.swarm_peers()
+            ids = [client.id_info() for client in clients]
+            for source, source_name in zip(clients, peer_names, strict=True):
+                for target_name, target in zip(peer_names, ids, strict=True):
+                    if target_name == source_name:
+                        continue
+                    source.swarm_connect(f"/dns4/{target_name}/tcp/4001/p2p/{target['ID']}")
+            peers = clients[0].swarm_peers()
+            described = ", ".join(
+                f"{name} ({peer_id['ID'][:12]}...)" for name, peer_id in zip(peer_names, ids, strict=True)
+            )
             print(
-                f"   - Kubo Private Swarm (LIBP2P_FORCE_PNET=1): "
-                f"ipfs-node1 ({id1['ID'][:12]}...) <-> ipfs-node2 ({peer2_id[:12]}...), peers={len(peers)}"
+                f"   - Kubo Private Swarm (LIBP2P_FORCE_PNET=1): {described}, peers={len(peers)}"
             )
             return
         except Exception as exc:
@@ -206,75 +285,92 @@ def action_health(ssl_ctx, args) -> None:
         [
             f"{args.node1_raft}/health",
             f"{args.node2_raft}/health",
+            f"{args.node3_raft}/health",
             f"{args.node1_rag}/status",
             f"{args.node2_rag}/status",
+            f"{args.node3_rag}/status",
         ],
     )
-    h1 = mtls_request(ssl_ctx, f"{args.node1_raft}/health")
-    h2 = mtls_request(ssl_ctx, f"{args.node2_raft}/health")
-    print(f"   - node1-maestro Raft role={h1['role']}, client_cn={h1['verified_client_cn']}")
-    print(f"   - node2-peer    Raft role={h2['role']}, client_cn={h2['verified_client_cn']}")
-    connect_kubo_private_swarm(args.node1_ipfs, args.node2_ipfs)
+    for name, url in (
+        ("node1-maestro", args.node1_raft),
+        ("node2-peer", args.node2_raft),
+        ("node3-peer", args.node3_raft),
+    ):
+        health = mtls_request(ssl_ctx, f"{url}/health")
+        print(
+            f"   - {name:<13} Raft role={health['role']}, quorum={health['quorum']}, "
+            f"members={len(health['members'])}, client_cn={health['verified_client_cn']}"
+        )
+    connect_kubo_private_swarm(args.node1_ipfs, args.node2_ipfs, args.node3_ipfs)
 
 
 def action_ingest(ssl_ctx, args) -> None:
-    print("Ingesting 50/50 Sharded PDFs + Kubo IPFS CIDs + Embeddings + Cross-Node Backups over mTLS...")
-    for doc in CORPUS_SHARD_1:
-        pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
+    ring = shard_ring(args)
+    urls = rag_urls(args)
+    print(
+        f"Ingesting {len(CORPUS)} synthetic PDFs into {ring.num_shards} hash shards "
+        f"(ownership by seeded SHA-256 of doc_id) + Kubo IPFS CIDs + Cross-Node Backups over mTLS..."
+    )
+    for doc in CORPUS:
+        assignment = ring.assignment(doc["doc_id"])
+        pdf_bytes = make_minimal_pdf(
+            doc["title"],
+            doc["chunks"],
+            doc_id=doc["doc_id"],
+            shard_owner=assignment["owner"],
+            metadata_holder=assignment["backup"],
+        )
         res = mtls_request(
             ssl_ctx,
-            f"{args.node1_rag}/shard/ingest-full",
+            f"{urls[assignment['owner']]}/shard/ingest-full",
             method="POST",
-            payload={
-                **doc,
-                "metadata_holder": "node2-peer",
-                "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-            },
+            payload={**doc, "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii")},
         )
+        stubbed = sorted(res["peer_metadata_stubs"])
         print(
-            f"   [Shard 1 -> node1-maestro] {doc['doc_id']} pinned CID={res['manifest']['ipfs_cid'][:18]}...; "
-            f"stub + backup verified on node2-peer (Raft block #{res['raft_block_index']}, "
+            f"   [{assignment['shard_id']} -> {assignment['owner']} | backup {assignment['backup']}] "
+            f"{doc['doc_id']} pinned CID={res['manifest']['ipfs_cid'][:18]}...; "
+            f"stubs on {stubbed} (Raft block #{res['raft_block_index']}, "
             f"sha256={res['manifest']['pdf_sha256'][:10]}...)"
         )
-
-    for doc in CORPUS_SHARD_2:
-        pdf_bytes = make_minimal_pdf(doc["title"], doc["chunks"])
-        res = mtls_request(
-            ssl_ctx,
-            f"{args.node2_rag}/shard/ingest-full",
-            method="POST",
-            payload={
-                **doc,
-                "metadata_holder": "node1-maestro",
-                "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-            },
-        )
-        print(
-            f"   [Shard 2 -> node2-peer]    {doc['doc_id']} pinned CID={res['manifest']['ipfs_cid'][:18]}...; "
-            f"stub + backup verified on node1-maestro (Raft block #{res['raft_block_index']}, "
-            f"sha256={res['manifest']['pdf_sha256'][:10]}...)"
-        )
+        if res["replica_warnings"]:
+            print(f"     ! replica warnings: {res['replica_warnings']}")
+    print(f"   - shard balance: {ring.balance(doc['doc_id'] for doc in CORPUS)}")
 
 
 def action_train(ssl_ctx, args) -> None:
     print(
         f"Running {args.rounds} Federated LoRA Training Rounds "
-        f"(mode={args.lora_mode}) across Node 1 (Shard 1) & Node 2 (Shard 2)..."
+        f"(mode={args.lora_mode}, aggregation={args.aggregation}) across all reachable members..."
     )
-    for r in range(1, args.rounds + 1):
+    for round_id in range(1, args.rounds + 1):
         round_res = mtls_request(
             ssl_ctx,
             f"{args.node1_rag}/fed/run-round",
             method="POST",
-            payload={"round_id": r, "lora_mode": args.lora_mode},
+            payload={
+                "round_id": round_id,
+                "lora_mode": args.lora_mode,
+                "aggregation": args.aggregation,
+            },
         )
-        c1, c2 = round_res["clients"][0], round_res["clients"][1]
+        per_client = " | ".join(
+            f"{client['node_id']} loss {client['first_loss']:.4f}->{client['last_loss']:.4f} "
+            f"({client['num_examples']} ex)"
+            for client in round_res["clients"]
+        )
         print(
-            f"   [Round {r} | {args.lora_mode}] "
-            f"{c1['node_id']} loss {c1['first_loss']:.4f}->{c1['last_loss']:.4f} | "
-            f"{c2['node_id']} loss {c2['first_loss']:.4f}->{c2['last_loss']:.4f} | "
-            f"FedAvg loss={round_res['weighted_loss']:.4f} | "
-            f"global_cid={round_res['global_adapter_cid'][:16]}... (Raft block #{round_res['raft_block_index']})"
+            f"   [Round {round_id} | {args.lora_mode} | {round_res['aggregation']}, "
+            f"server_lr={round_res['server_lr']}] {per_client} | "
+            f"global loss={round_res['weighted_loss']:.4f} | "
+            f"participants={sorted(round_res['participants'])}"
+            + (
+                f" | unavailable={sorted(round_res['unavailable_members'])}"
+                if round_res["unavailable_members"]
+                else ""
+            )
+            + f" | global_cid={round_res['global_adapter_cid'][:16]}... "
+            f"(Raft block #{round_res['raft_block_index']})"
         )
 
 
@@ -285,19 +381,26 @@ def action_query(ssl_ctx, args) -> None:
         else [
             "Which SODTYPE code identifies customer records in TRDR?",
             "What SOSOURCE code is used for purchase invoices from suppliers in FINDOC?",
+            "How are credit notes recorded in FINDOC?",
         ]
     )
-    print("Running Decentralized Scatter-Gather RAG Queries across Both Shards...")
-    for q in queries:
+    print("Running Decentralized Scatter-Gather RAG Queries across all shards...")
+    for query in queries:
         q_res = mtls_request(
             ssl_ctx,
             f"{args.node1_rag}/rag/query-decentralized",
             method="POST",
-            payload={"query": q, "k": 2},
+            payload={"query": query, "k": 2},
+        )
+        coverage = (
+            "complete"
+            if q_res["complete"]
+            else f"degraded: missing {q_res['missing_shards']} ({q_res['missing_nodes']})"
         )
         top = q_res["top_k"][0]
         print(
-            f"   Query: {q!r}\n"
+            f"   Query: {query!r}\n"
+            f"     -> {coverage} | searched={sorted(q_res['searched_nodes'])}\n"
             f"     -> Top Hit from {top['node_id']} ({top['doc_id']}): {top['text']!r}\n"
             f"     -> Cosine Score={top['score']} | On-Chain SHA-256 Verified={top['ledger_hash_verified']}"
         )
@@ -305,7 +408,7 @@ def action_query(ssl_ctx, args) -> None:
 
 def action_tamper(ssl_ctx, args) -> None:
     print("Verifying Tamper Rejection on Raft Ledger...")
-    tampered_rejected = False
+    rejected = False
     try:
         mtls_request(
             ssl_ctx,
@@ -314,7 +417,7 @@ def action_tamper(ssl_ctx, args) -> None:
             payload={
                 "tx_type": "BACKUP_CHECK",
                 "payload": {
-                    "doc_id": "doc-101",
+                    "doc_id": "doc-121",
                     "source_node": "node1-maestro",
                     "backup_node": "node2-peer",
                     "computed_sha256": "f" * 64,
@@ -322,63 +425,83 @@ def action_tamper(ssl_ctx, args) -> None:
             },
         )
     except RuntimeError as exc:
-        tampered_rejected = True
+        rejected = True
         print(f"   -> Tampered backup checksum properly rejected by Raft chaincode: {exc}")
 
-    if not tampered_rejected:
+    if not rejected:
         raise RuntimeError("Expected tampered backup checksum to be rejected!")
 
 
 def action_status(ssl_ctx, args) -> None:
-    s1 = mtls_request(ssl_ctx, f"{args.node1_rag}/status")
-    s2 = mtls_request(ssl_ctx, f"{args.node2_rag}/status")
-    h1_end = s1["raft"]["ledger"]["height"]
-    h2_end = s2["raft"]["ledger"]["height"]
-    hash1 = s1["raft"]["ledger"]["last_hash"]
-    hash2 = s2["raft"]["ledger"]["last_hash"]
-    ipfs1 = s1.get("ipfs", {})
-    ipfs2 = s2.get("ipfs", {})
+    ring = shard_ring(args)
+    statuses = {
+        name: mtls_request(ssl_ctx, f"{url}/status")
+        for name, url in (
+            ("node1-maestro", args.node1_rag),
+            ("node2-peer", args.node2_rag),
+            ("node3-peer", args.node3_rag),
+        )
+    }
+    print(f"Cluster Consistency & Storage Check ({ring.num_shards} shards):")
+    for name, status in statuses.items():
+        store = status["rag_store"]
+        shard = store["shard"]
+        ledger = status["raft"]["ledger"]
+        ipfs = status.get("ipfs", {})
+        print(
+            f"   - {name:<13} owns {shard['shard_id']:<8} "
+            f"full_docs={len(store['full_shard_documents'])}, "
+            f"metadata_stubs={len(store['metadata_only_stubs'])}, "
+            f"verified_backups={len(store['verified_backups'])} (backup of {shard['backup_target']}), "
+            f"ipfs={ipfs.get('mode')} (pins={len(ipfs.get('pins', []))}), "
+            f"raft_height={ledger['height']}, tip_hash={ledger['last_hash'][:16]}..."
+        )
 
-    print("Cluster Consistency & Storage Check:")
-    print(
-        f"   - node1-maestro: full_docs={len(s1['rag_store']['full_shard_documents'])}, "
-        f"metadata_stubs={len(s1['rag_store']['metadata_only_stubs'])}, "
-        f"verified_backups={len(s1['rag_store']['verified_backups'])}, "
-        f"ipfs={ipfs1.get('mode')} (pins={len(ipfs1.get('pins', []))}), "
-        f"raft_height={h1_end}, tip_hash={hash1[:16]}..."
+    owners = {status["rag_store"]["shard"]["shard_id"]: status["rag_store"]["node_id"] for status in statuses.values()}
+    expected = {ring.shard_id(index) for index in range(ring.num_shards)}
+    assert set(owners) == expected, f"shard owners {sorted(owners)} != {sorted(expected)}"
+    coverage: dict[str, int] = {}
+    for status in statuses.values():
+        for shard_id, count in status["rag_store"]["shard_coverage"].items():
+            coverage[shard_id] = max(coverage.get(shard_id, 0), count)
+    described = ", ".join(
+        f"{shard_id}({owners[shard_id]})={count}" for shard_id, count in sorted(coverage.items())
     )
-    print(
-        f"   - node2-peer:    full_docs={len(s2['rag_store']['full_shard_documents'])}, "
-        f"metadata_stubs={len(s2['rag_store']['metadata_only_stubs'])}, "
-        f"verified_backups={len(s2['rag_store']['verified_backups'])}, "
-        f"ipfs={ipfs2.get('mode')} (pins={len(ipfs2.get('pins', []))}), "
-        f"raft_height={h2_end}, tip_hash={hash2[:16]}..."
-    )
-    assert h1_end == h2_end and hash1 == hash2, "Raft ledger state diverged between nodes!"
+    print(f"   - shard coverage: {described}")
+
+    tips = {(status["raft"]["ledger"]["height"], status["raft"]["ledger"]["last_hash"]) for status in statuses.values()}
+    assert len(tips) == 1, f"Raft ledger state diverged between nodes: {sorted(tips)}"
 
 
 def action_ledger(ssl_ctx, args) -> None:
-    snap = mtls_request(ssl_ctx, f"{args.node1_raft}/ledger")
-    print(json.dumps(snap, indent=2))
+    snapshot = mtls_request(ssl_ctx, f"{args.node1_raft}/ledger")
+    print(json.dumps(snapshot, indent=2))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run 2-Docker-node mTLS Federated LoRA & Sharded RAG CLI")
+    parser = argparse.ArgumentParser(description="Run 3-node mTLS Federated LoRA & Sharded RAG CLI")
     parser.add_argument(
         "--action",
         default="all",
         choices=("all", "health", "ingest", "train", "query", "tamper", "status", "ledger"),
     )
+    parser.add_argument("--node1-id", default="node1-maestro")
+    parser.add_argument("--node2-id", default="node2-peer")
+    parser.add_argument("--node3-id", default="node3-peer")
     parser.add_argument("--node1-rag", default="https://localhost:18443")
     parser.add_argument("--node2-rag", default="https://localhost:28443")
+    parser.add_argument("--node3-rag", default="https://localhost:38443")
     parser.add_argument("--node1-raft", default="https://localhost:17050")
     parser.add_argument("--node2-raft", default="https://localhost:27050")
+    parser.add_argument("--node3-raft", default="https://localhost:37050")
     parser.add_argument("--node1-ipfs", default="http://localhost:15001")
     parser.add_argument("--node2-ipfs", default="http://localhost:25001")
+    parser.add_argument("--node3-ipfs", default="http://localhost:35001")
     parser.add_argument("--connection-profile", default="./connection-profile.json")
     parser.add_argument("--certs-dir", default="./certs")
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--lora-mode", default="fedavg", choices=("fedavg", "ffa", "dora"))
+    parser.add_argument("--aggregation", default="average", choices=("average", "summed"))
     parser.add_argument("--query", default="")
     args = parser.parse_args()
 
@@ -416,7 +539,7 @@ def main() -> None:
         action_tamper(ssl_ctx, args)
         print()
         action_status(ssl_ctx, args)
-        print("\nSUCCESS: 2-Docker mTLS Raft + 50/50 Sharded RAG + Federated LoRA test passed!")
+        print("\nSUCCESS: 3-node mTLS Raft + hash-sharded RAG + Federated LoRA test passed!")
 
 
 if __name__ == "__main__":

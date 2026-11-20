@@ -2,7 +2,7 @@
 
 Connects to the local Kubo HTTP RPC API (`http://localhost:5001/api/v0/...`)
 running in Private Swarm mode (`LIBP2P_FORCE_PNET=1` + `swarm.key`) to:
-- Add and pin 50% shard PDFs and LoRA adapter weights (`POST /api/v0/add?pin=true&cid-version=1`)
+- Add and pin shard PDFs and LoRA adapter weights (`POST /api/v0/add?pin=true&cid-version=1`)
 - Replicate and pin backup CIDs across peers (`POST /api/v0/pin/add?arg=<CID>`)
 - Retrieve content by CID (`POST /api/v0/cat?arg=<CID>`)
 - Connect private swarm peers (`POST /api/v0/swarm/connect?arg=<multiaddr>`)

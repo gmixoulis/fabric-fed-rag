@@ -151,8 +151,8 @@ def export_all_from_json(raw_json_path: Path, results_dir: Path) -> Path:
             "Question",
             "Gold SQL",
             "No-RAG Result",
-            "Single-Shard (50%) Result",
-            "Decentralized 50/50 RAG Result",
+            "Single-Shard (Node 1) Result",
+            "Decentralized All-Shard RAG Result",
             "Decentralized Generated SQL",
             "Decentralized Latency (s)",
         ]

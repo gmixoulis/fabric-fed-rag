@@ -258,6 +258,7 @@ class LedgerState:
                 "height": len(self.entries),
                 "last_index": last["index"],
                 "last_hash": last["entry_hash"],
+                "lora_quorum": self.lora_quorum,
                 "documents": self.documents,
                 "backups": self.backups,
                 "client_submissions": self.client_submissions,
