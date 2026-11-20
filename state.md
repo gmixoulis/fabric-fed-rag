@@ -9,10 +9,11 @@
 - [x] Port and extend Federated LoRA training (`fedavg.py`, `trainer.py` with `fedavg` & `ffa` modes, `hw_training/`) and 50/50 Sharded PDF/RAG store (`shard_store.py`, `embed.py`, `node_service.py`)
 - [x] Include agent instruction files (`AGENTS.md`, `.trail/learnings/`, `docs/ARCHITECTURE.md`, `docs/EXPERIMENTS.md`, `docs/RESEARCH-LOG.md`, `docs/RESEARCH_PLAN.md`)
 - [x] Add modular CLI runner (`./run.sh`) and comprehensive test suite (`tests/test_pipeline.py`, `tests/test_fedavg_and_keys.py`, `tests/test_raft_mtls_cluster.py` — 7/7 passing)
+- [x] WP1: three organisations on the ledger — `Peer3Org`/`node3-peer` certs and connection profile, configured Raft membership with 2-of-3 commit and election, configurable `LORA_ROUND_FINALIZE` majority quorum, offline three-node mTLS tests (`docs/EXPERIMENTS.md` E8)
 
 ### In Progress
 
-- Planned 2026-11-20: three nodes, one Ollama per node, data in thirds, Mac as third node later. See `docs/PLAN-3-NODES-OLLAMA.md` (start with WP1 and WP2).
+- Planned 2026-11-20: three nodes, one Ollama per node, data in thirds, Mac as third node later. See `docs/PLAN-3-NODES-OLLAMA.md` (WP1 done; WP2 next, then WP3).
 
 ### Decisions Made
 

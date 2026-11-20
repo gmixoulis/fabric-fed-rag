@@ -1,9 +1,10 @@
 """Per-Node mTLS Service for Decentralized 50/50 Sharded RAG & Federated LoRA Training.
 
-Runs on each Docker peer (`node1-maestro` and `node2-peer`), enforcing TLS 1.3
+Runs on each Docker peer (`node1-maestro`, `node2-peer`, `node3-peer`), enforcing TLS 1.3
 mutual authentication (`ssl.CERT_REQUIRED`) for all peer-to-peer and Maestro-to-peer calls,
 and committing all document hashes, backup verifications, and LoRA round hashes to the
-Python Raft ledger (`fedrag/raft_ledger.py`).
+Python Raft ledger (`fedrag/raft_ledger.py`). The ledger membership and finalize quorum
+are configured on the Raft process, not derived from the number of RAG peers here.
 """
 
 from __future__ import annotations
@@ -307,6 +308,7 @@ class NodeApp:
             "lora_mode": lora_mode,
             "global_adapter_cid": global_cid,
             "global_adapter_sha256": global_sha,
+            "participants": [local_res["node_id"], peer_res["node_id"]],
             "participant_hashes": {
                 local_res["node_id"]: local_res["adapter_sha256"],
                 peer_res["node_id"]: peer_res["adapter_sha256"],

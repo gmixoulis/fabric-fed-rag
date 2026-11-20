@@ -58,14 +58,37 @@ export interface LoRARoundFinalized {
   weighted_loss: number;
 }
 
+export interface ValidatorConfig {
+  /** Full raft membership, in node ids. Empty/omitted keeps the legacy permissive mode. */
+  members?: string[];
+  /** Minimum distinct submitters accepted by LORA_ROUND_FINALIZE. Default: majority of members. */
+  loraQuorum?: number;
+}
+
 const isSha256 = (value: string): boolean => /^[a-f0-9]{64}$/i.test(value);
+
+const majority = (nodeCount: number): number => {
+  if (nodeCount <= 0) {
+    throw new Error("a raft membership needs at least one node");
+  }
+  return Math.floor(nodeCount / 2) + 1;
+};
 
 export function validateTransaction(
   txType: TxType,
   payload: unknown,
   documents: Record<string, DocManifest>,
   clientSubs: Record<number, Record<string, LoRAClientSubmission>>,
+  config: ValidatorConfig = {},
 ): void {
+  const members = (config.members ?? []).filter(Boolean);
+  const loraQuorum = config.loraQuorum ?? (members.length > 0 ? majority(members.length) : 1);
+  if (loraQuorum <= 0) {
+    throw new Error("loraQuorum must be positive");
+  }
+  if (members.length > 0 && loraQuorum > members.length) {
+    throw new Error("loraQuorum cannot exceed the number of configured members");
+  }
   if (txType === "DOC_MANIFEST") {
     const doc = payload as DocManifest;
     if (!doc.doc_id || !isSha256(doc.pdf_sha256) || !isSha256(doc.chunks_sha256)) {
@@ -118,6 +141,15 @@ export function validateTransaction(
     if (sub.round_id <= 0 || !sub.node_id || !isSha256(sub.adapter_sha256) || sub.num_examples <= 0) {
       throw new Error("Invalid LORA_CLIENT_SUBMIT fields");
     }
+    if (members.length > 0 && !members.includes(sub.node_id)) {
+      throw new Error(`LORA_CLIENT_SUBMIT from non-member ${sub.node_id}`);
+    }
+    const recorded = clientSubs[sub.round_id]?.[sub.node_id];
+    if (recorded && recorded.adapter_sha256 !== sub.adapter_sha256) {
+      throw new Error(
+        `Conflicting duplicate LORA_CLIENT_SUBMIT for ${sub.node_id} in round ${sub.round_id}`,
+      );
+    }
     return;
   }
 
@@ -126,14 +158,39 @@ export function validateTransaction(
     if (fin.round_id <= 0 || !isSha256(fin.global_adapter_sha256)) {
       throw new Error("Invalid LORA_ROUND_FINALIZE fields");
     }
-    const participants = Object.entries(fin.participant_hashes ?? {});
-    if (participants.length === 0) {
+    const entries = Object.entries(fin.participant_hashes ?? {});
+    if (entries.length === 0) {
       throw new Error(`LORA_ROUND_FINALIZE for round ${fin.round_id} requires participant_hashes`);
     }
+
+    const declared = (fin as LoRARoundFinalized & { participants?: unknown }).participants;
+    if (declared !== undefined) {
+      if (!Array.isArray(declared) || declared.some((id) => typeof id !== "string" || id.length === 0)) {
+        throw new Error("LORA_ROUND_FINALIZE participants must be a list of node ids");
+      }
+      const participantIds = declared as string[];
+      if (new Set(participantIds).size !== participantIds.length) {
+        throw new Error(`Duplicate submitter in LORA_ROUND_FINALIZE for round ${fin.round_id}`);
+      }
+      const declaredSorted = [...participantIds].sort();
+      const hashedSorted = entries.map(([nodeId]) => nodeId).sort();
+      if (
+        declaredSorted.length !== hashedSorted.length ||
+        declaredSorted.some((id, index) => id !== hashedSorted[index])
+      ) {
+        throw new Error(
+          `LORA_ROUND_FINALIZE participants do not match participant_hashes for round ${fin.round_id}`,
+        );
+      }
+    }
+
     const roundSubs = clientSubs[fin.round_id] ?? {};
-    for (const [nodeId, expectedHash] of participants) {
+    for (const [nodeId, expectedHash] of entries) {
       if (!isSha256(expectedHash)) {
         throw new Error(`Invalid participant hash for ${nodeId} in round ${fin.round_id}`);
+      }
+      if (members.length > 0 && !members.includes(nodeId)) {
+        throw new Error(`Non-member submitter ${nodeId} in LORA_ROUND_FINALIZE for round ${fin.round_id}`);
       }
       const committed = roundSubs[nodeId];
       if (!committed) {
@@ -142,6 +199,11 @@ export function validateTransaction(
       if (committed.adapter_sha256 !== expectedHash) {
         throw new Error(`Adapter hash mismatch for ${nodeId} in round ${fin.round_id}`);
       }
+    }
+    if (entries.length < loraQuorum) {
+      throw new Error(
+        `LORA_ROUND_FINALIZE for round ${fin.round_id} requires submissions from ${loraQuorum} member(s), got ${entries.length}`,
+      );
     }
     return;
   }

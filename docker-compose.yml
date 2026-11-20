@@ -43,6 +43,8 @@ services:
       - RAFT_ROLE=leader
       - LEADER_URL=https://node1-maestro:7050
       - RAFT_PEERS=https://node2-peer:7050
+      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050
+      - LORA_QUORUM=2
       - PEER_RAG_URL=https://node2-peer:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node1:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}
@@ -68,6 +70,8 @@ services:
       - RAFT_ROLE=follower
       - LEADER_URL=https://node1-maestro:7050
       - RAFT_PEERS=
+      - RAFT_MEMBER_URLS=node1-maestro=https://node1-maestro:7050,node2-peer=https://node2-peer:7050
+      - LORA_QUORUM=2
       - PEER_RAG_URL=https://node1-maestro:8443
       - FEDRAG_IPFS_API_URL=http://ipfs-node2:5001
       - FEDRAG_EMBEDDER=${FEDRAG_EMBEDDER:-hash}

@@ -8,6 +8,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+DEFAULT_NODES = "node1-maestro,node2-peer,node3-peer"
+NODE_ORGS = {
+    "node1-maestro": "MaestroOrg",
+    "node2-peer": "Peer2Org",
+    "node3-peer": "Peer3Org",
+}
+
 
 def generate_swarm_key(out_dir: Path) -> Path:
     """Generate a 256-bit Private IPFS Swarm PSK (swarm.key) for LIBP2P_FORCE_PNET=1."""
@@ -20,8 +27,14 @@ def generate_swarm_key(out_dir: Path) -> Path:
     return swarm_key_path
 
 
-def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> None:
+def generate_certs(
+    out_dir: Path,
+    nodes: list[str],
+    extra_ips: list[str],
+    node_orgs: dict[str, str] | None = None,
+) -> None:
     out_dir = Path(out_dir)
+    orgs = {**NODE_ORGS, **(node_orgs or {})}
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ca_key = out_dir / "ca.key"
@@ -86,6 +99,7 @@ def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> Non
             check=True,
             capture_output=True,
         )
+        org = orgs.get(node, "FabricFedRAG Peer MSP")
         subprocess.run(
             [
                 "openssl",
@@ -96,7 +110,7 @@ def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> Non
                 "-out",
                 str(node_csr),
                 "-subj",
-                f"/O=FabricFedRAG Peer MSP/CN={node}",
+                f"/O={org}/CN={node}",
             ],
             check=True,
             capture_output=True,
@@ -156,7 +170,7 @@ def generate_certs(out_dir: Path, nodes: list[str], extra_ips: list[str]) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate FabricFedRAG X.509 mTLS certificates")
     parser.add_argument("--out", default="./certs", help="Output directory")
-    parser.add_argument("--nodes", default="node1-maestro,node2-peer", help="Comma-separated node names")
+    parser.add_argument("--nodes", default=DEFAULT_NODES, help="Comma-separated node names")
     parser.add_argument("--ips", default="127.0.0.1", help="Comma-separated IP SANs")
     args = parser.parse_args()
 

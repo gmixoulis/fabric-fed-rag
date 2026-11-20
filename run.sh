@@ -31,15 +31,15 @@ fi
 CMD="${1:-all}"
 
 ensure_certs() {
-  if [ ! -f "./certs/ca.crt" ] || [ ! -f "./certs/node1-maestro.crt" ] || [ ! -f "./certs/node2-peer.crt" ]; then
+  if [ ! -f "./certs/ca.crt" ] || [ ! -f "./certs/node1-maestro.crt" ] || [ ! -f "./certs/node2-peer.crt" ] || [ ! -f "./certs/node3-peer.crt" ]; then
     echo ">>> Generating X.509 CA & mTLS certificates..."
-    $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer
+    $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer,node3-peer
   fi
 }
 
 case "$CMD" in
   certs)
-    $PY -m fedrag.certgen --out ./certs --nodes "${2:-node1-maestro,node2-peer}" --ips "${3:-127.0.0.1}"
+    $PY -m fedrag.certgen --out ./certs --nodes "${2:-node1-maestro,node2-peer,node3-peer}" --ips "${3:-127.0.0.1}"
     ;;
 
   build)
@@ -104,7 +104,7 @@ case "$CMD" in
     ;;
 
   all)
-    $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer
+    $PY -m fedrag.certgen --out ./certs --nodes node1-maestro,node2-peer,node3-peer
     docker compose down -v >/dev/null 2>&1 || true
     docker compose up -d --build
     $PY scripts/run_demo.py --action all
