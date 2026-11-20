@@ -7,6 +7,8 @@ python3 -m fedrag.raft_ledger \
   --listen-port 7050 \
   --leader-url "${LEADER_URL}" \
   --peers "${RAFT_PEERS}" \
+  --member-urls "${RAFT_MEMBER_URLS}" \
+  --lora-quorum "${LORA_QUORUM:-2}" \
   --ca "/certs/ca.crt" \
   --cert "/certs/${NODE_ID}.crt" \
   --key "/certs/${NODE_ID}.key" \

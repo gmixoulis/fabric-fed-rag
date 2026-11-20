@@ -46,3 +46,11 @@ You can run the full pipeline at once or run individual commands step-by-step:
 ./run.sh ledger                                          # Print the full Raft block ledger JSON
 ./run.sh down                                            # Stop and clean up containers & volumes
 ```
+
+## Offline tests
+
+```bash
+PYTHONPATH=. uv run --with pytest --with numpy pytest -q
+PYTHONPATH=. uv run --with ruff ruff check --config pyproject.toml fedrag scripts tests
+node --experimental-strip-types chaincode/validator.test.ts   # TypeScript chaincode twin
+```

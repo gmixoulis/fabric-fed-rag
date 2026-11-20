@@ -169,6 +169,25 @@ flag conflict; and the invoice-type field rules above. The client's company
 address is empty in this backup, so the printed Art. 9 identity check fails
 for the issuer; the PDF says so.
 
+## E8. Three-organisation Raft ledger, offline (WP1, 2026-11-20)
+
+No Docker, no GPU, no external network: certificates generated in a temp directory,
+ephemeral localhost TLS 1.3 mTLS sockets, temporary ledger files.
+
+| Check | Result |
+|---|---|
+| Three-member cluster commits a document manifest | pass: all three tips share index and SHA-256 hash |
+| One follower stopped, leader plus one follower | pass: commit at 2 of 3 acks |
+| Stopped follower restarts | pass: catches up via leader replication, tip hash matches |
+| Two followers stopped | pass: `raft quorum not reached: got 1/3 acks (need 2)`, leader log unchanged |
+| Election with two members alive / one alive | pass: 2 of 3 wins, 1 of 3 does not |
+| `LORA_ROUND_FINALIZE` quorum | pass: 2 of 3 accepted with default majority; 1 of 3, non-member, duplicate submitter all rejected |
+| Two-node regression suite | pass: existing cluster test unchanged |
+| Certificate and profile | pass: `Peer3Org` / `node3-peer` has SKI+AKI, O=Peer3Org, key mode 0600, path under ignored `certs/` |
+
+Not measured here: Docker topology, per-node Ollama, three-way shards, federated
+training over three nodes (WP2-WP4).
+
 ## Threats to validity
 
 - **Single runs.** Speeds are one `llama-bench` run each; no variance is reported.
